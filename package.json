@@ -1,0 +1,67 @@
+{
+  "name": "cc-persist",
+  "displayName": "cc-persist",
+  "description": "Persistent Claude Code terminal sessions via named session resume",
+  "version": "0.1.0",
+  "publisher": "fongy",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cc-persist.newTerminal",
+        "title": "New Claude Terminal",
+        "category": "cc-persist"
+      },
+      {
+        "command": "cc-persist.renameTerminal",
+        "title": "Rename Claude Terminal",
+        "category": "cc-persist"
+      },
+      {
+        "command": "cc-persist.cycleSignal",
+        "title": "Cycle to Next Signal",
+        "category": "cc-persist"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "cc-persist.renameTerminal",
+        "key": "cmd+shift+r",
+        "when": "terminalFocus"
+      },
+      {
+        "command": "cc-persist.cycleSignal",
+        "key": "cmd+ctrl+alt+m"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "watch": "npm run compile -- --watch",
+    "vscode:prepublish": "npm run compile -- --minify",
+    "package": "vsce package",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.7.1",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  }
+}
