@@ -82,7 +82,7 @@ describe("STRESS3: FIX VERIFIED -- MAX_SAFE_INTEGER index rejected to prevent ov
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(1);
-    expect(restored[0].name).toBe("valid");
+    expect(tm.getSavedName(5)).toBe("valid");
   });
 });
 

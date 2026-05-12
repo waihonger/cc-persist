@@ -170,7 +170,6 @@ export class TerminalManager {
       }
 
       const terminal = vscode.window.createTerminal({
-        name: info.name,
         env: {
           DTACH_SIGNAL_DIR: this.sigDir,
           DTACH_SOCKET_INDEX: info.index.toString(),

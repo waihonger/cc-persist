@@ -50,7 +50,7 @@ describe("STRESS: State file with duplicate indices", () => {
 
     // Only first entry with index 0 is restored
     expect(restored).toHaveLength(1);
-    expect(restored[0].name).toBe("session-a");
+    expect(tm.getSavedName(0)).toBe("session-a");
   });
 
   it("duplicate index does not corrupt nextIndex calculation", () => {

@@ -180,8 +180,8 @@ describe("TerminalManager", () => {
       const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
       const terminals = tm2.restoreTerminals();
       expect(terminals).toHaveLength(2);
-      expect(terminals[0].name).toBe("warroom");
-      expect(terminals[1].name).toBe("alan");
+      expect(tm2.getSavedName(0)).toBe("warroom");
+      expect(tm2.getSavedName(1)).toBe("alan");
       tm2.disposeAll();
     });
 
@@ -218,7 +218,7 @@ describe("TerminalManager", () => {
       const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
       const terminals = tm2.restoreTerminals();
       expect(terminals).toHaveLength(1);
-      expect(terminals[0].name).toBe("valid-session");
+      expect(tm2.getSavedName(1)).toBe("valid-session");
       tm2.disposeAll();
     });
 

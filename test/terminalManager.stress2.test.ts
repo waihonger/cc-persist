@@ -185,7 +185,7 @@ describe("STRESS2: Verify fix -- duplicate indices deduplicated, first wins", ()
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(1);
-    expect(restored[0].name).toBe("first");
+    expect(tm.getSavedName(3)).toBe("first");
   });
 
   it("mixed duplicate and unique indices -- unique all restored", () => {
@@ -202,7 +202,7 @@ describe("STRESS2: Verify fix -- duplicate indices deduplicated, first wins", ()
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(3);
-    expect(restored.map((t) => t.name)).toEqual(["a", "b", "c"]);
+    expect([0, 1, 2].map((i) => tm.getSavedName(i))).toEqual(["a", "b", "c"]);
   });
 });
 
