@@ -119,14 +119,12 @@ export class TerminalManager {
     }
   }
 
-  createTerminal(name?: string): vscode.Terminal {
+  createTerminal(_unusedName?: string): vscode.Terminal {
     const index = this.nextIndex++;
-    const displayName = name || `Terminal ${index + 1}`;
 
     fs.mkdirSync(this.sigDir, { recursive: true });
 
     const terminal = vscode.window.createTerminal({
-      name: displayName,
       env: {
         DTACH_SIGNAL_DIR: this.sigDir,
         DTACH_SOCKET_INDEX: index.toString(),
@@ -138,7 +136,7 @@ export class TerminalManager {
     this.terminalToIndex.set(terminal, index);
     this.indexToTerminal.set(index, terminal);
     terminal.sendText(`export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${index}'`);
-    this.log.appendLine(`Created terminal ${index}: ${displayName}`);
+    this.log.appendLine(`Created terminal ${index}`);
     return terminal;
   }
 

@@ -84,21 +84,17 @@ describe("TerminalManager", () => {
       expect(tm.getIndex(t2)).toBe(1);
     });
 
-    it("creates terminal with correct name", () => {
-      const t = tm.createTerminal("warroom");
-      expect(t.name).toBe("warroom");
-    });
-
     it("creates terminal with env vars", () => {
-      const t = tm.createTerminal("test");
+      const t = tm.createTerminal();
       const opts = (t as any).creationOptions;
       expect(opts.env.DTACH_SIGNAL_DIR).toBeDefined();
       expect(opts.env.DTACH_SOCKET_INDEX).toBe("0");
     });
 
-    it("uses default name when none provided", () => {
+    it("does not set name on created terminal (Claude owns the title)", () => {
       const t = tm.createTerminal();
-      expect(t.name).toBe("Terminal 1");
+      const opts = (t as any).creationOptions;
+      expect(opts.name).toBeUndefined();
     });
   });
 
@@ -116,8 +112,9 @@ describe("TerminalManager", () => {
       expect(showSpy).toHaveBeenCalled();
     });
 
-    it("getSavedName returns name for tracked terminal", () => {
-      tm.createTerminal("warroom");
+    it("getSavedName returns name for renamed terminal", () => {
+      const t = tm.createTerminal();
+      tm.renameTerminal(t, "warroom");
       expect(tm.getSavedName(0)).toBe("warroom");
     });
   });
