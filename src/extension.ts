@@ -74,7 +74,6 @@ export async function activate(
 
       terminalManager!.renameTerminal(terminal, name);
       terminal.sendText(`/rename ${name}`);
-      vscode.commands.executeCommand("workbench.action.terminal.renameWithArg", { name });
       terminalManager!.saveState();
       log.appendLine(`User renamed terminal to: ${name}`);
     }),
