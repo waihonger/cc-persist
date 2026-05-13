@@ -265,17 +265,81 @@ describe("TerminalManager", () => {
     it("renameTerminal rejects invalid names", () => {
       const t = tm.createTerminal("Terminal 1");
       const result = tm.renameTerminal(t, "'; rm -rf /");
-      expect(result).toBe(false);
+      expect(result).toBe(null);
       expect(tm.getSessionName(t)).toBeUndefined();
     });
 
     it("renameTerminal adopts untracked terminal", () => {
       const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
       const result = tm.renameTerminal(fakeTerminal, "warroom");
-      expect(result).toBe(true);
+      expect(result).toBe("warroom");
       expect(tm.isTracked(fakeTerminal)).toBe(true);
       expect(tm.getSessionName(fakeTerminal)).toBe("warroom");
       expect(tm.getIndex(fakeTerminal)).toBeDefined();
+    });
+
+    it("renameTerminal returns base name when unique", () => {
+      const t = tm.createTerminal("Terminal 1");
+      expect(tm.renameTerminal(t, "warroom")).toBe("warroom");
+    });
+
+    it("renameTerminal appends -2 on collision", () => {
+      const t1 = tm.createTerminal("Terminal 1");
+      const t2 = tm.createTerminal("Terminal 2");
+      tm.renameTerminal(t1, "warroom");
+      expect(tm.renameTerminal(t2, "warroom")).toBe("warroom-2");
+      expect(tm.getSessionName(t2)).toBe("warroom-2");
+    });
+
+    it("renameTerminal increments counter past existing suffixes", () => {
+      const t1 = tm.createTerminal("Terminal 1");
+      const t2 = tm.createTerminal("Terminal 2");
+      const t3 = tm.createTerminal("Terminal 3");
+      tm.renameTerminal(t1, "warroom");
+      tm.renameTerminal(t2, "warroom");
+      expect(tm.renameTerminal(t3, "warroom")).toBe("warroom-3");
+    });
+
+    it("renameTerminal to same name on same terminal is no-op", () => {
+      const t = tm.createTerminal("Terminal 1");
+      tm.renameTerminal(t, "warroom");
+      expect(tm.renameTerminal(t, "warroom")).toBe("warroom");
+    });
+
+    it("renameTerminal fills counter gap", () => {
+      const t1 = tm.createTerminal("Terminal 1");
+      const t2 = tm.createTerminal("Terminal 2");
+      const t3 = tm.createTerminal("Terminal 3");
+      tm.renameTerminal(t1, "warroom");
+      tm.renameTerminal(t2, "warroom-3");
+      expect(tm.renameTerminal(t3, "warroom")).toBe("warroom-2");
+    });
+
+    it("renameTerminal treats explicit suffixed base as its own name", () => {
+      const t1 = tm.createTerminal("Terminal 1");
+      const t2 = tm.createTerminal("Terminal 2");
+      tm.renameTerminal(t1, "warroom-2");
+      expect(tm.renameTerminal(t2, "warroom-2")).toBe("warroom-2-2");
+    });
+
+    it("getSavedName returns collision-resolved name", () => {
+      const t1 = tm.createTerminal("Terminal 1");
+      const t2 = tm.createTerminal("Terminal 2");
+      tm.renameTerminal(t1, "warroom");
+      tm.renameTerminal(t2, "warroom");
+      const idx2 = tm.getIndex(t2)!;
+      expect(tm.getSavedName(idx2)).toBe("warroom-2");
+    });
+
+    it("renameTerminal truncates base to keep resolved name within 64-char limit", () => {
+      const t1 = tm.createTerminal("Terminal 1");
+      const t2 = tm.createTerminal("Terminal 2");
+      const longBase = "a".repeat(64);
+      tm.renameTerminal(t1, longBase);
+      const resolved = tm.renameTerminal(t2, longBase);
+      expect(resolved).not.toBeNull();
+      expect(resolved!.length).toBeLessThanOrEqual(64);
+      expect(resolved).toMatch(/-2$/);
     });
 
     it("adopted terminal appears in saveState", () => {
@@ -290,7 +354,7 @@ describe("TerminalManager", () => {
     it("renameTerminal still rejects invalid names on untracked terminal", () => {
       const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
       const result = tm.renameTerminal(fakeTerminal, "'; rm -rf /");
-      expect(result).toBe(false);
+      expect(result).toBe(null);
       expect(tm.isTracked(fakeTerminal)).toBe(false);
     });
 

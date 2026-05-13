@@ -252,14 +252,31 @@ export class TerminalManager {
     return this.sessionNames.get(terminal) ?? terminal.name;
   }
 
-  renameTerminal(terminal: vscode.Terminal, name: string): boolean {
-    if (!isValidSessionName(name)) return false;
+  renameTerminal(terminal: vscode.Terminal, name: string): string | null {
+    if (!isValidSessionName(name)) return null;
     if (!this.terminalToIndex.has(terminal)) {
       this.adoptTerminal(terminal);
     }
-    this.sessionNames.set(terminal, name);
-    this.log.appendLine(`Renamed terminal ${this.terminalToIndex.get(terminal)}: ${name}`);
-    return true;
+    this.sessionNames.delete(terminal);
+    const unique = this.resolveUniqueName(name);
+    this.sessionNames.set(terminal, unique);
+    const index = this.terminalToIndex.get(terminal);
+    this.log.appendLine(`Renamed terminal ${index}: ${unique}`);
+    return unique;
+  }
+
+  private resolveUniqueName(base: string): string {
+    const MAX = 64;
+    const taken = new Set(this.sessionNames.values());
+    if (!taken.has(base)) return base;
+    let n = 2;
+    while (true) {
+      const suffix = `-${n}`;
+      const truncated = base.length + suffix.length > MAX ? base.slice(0, MAX - suffix.length) : base;
+      const candidate = `${truncated}${suffix}`;
+      if (!taken.has(candidate)) return candidate;
+      n++;
+    }
   }
 
   private adoptTerminal(terminal: vscode.Terminal): void {

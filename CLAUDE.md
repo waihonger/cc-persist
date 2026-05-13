@@ -22,10 +22,16 @@ To install locally: `code --install-extension cc-persist-*.vsix`
 ## Architecture
 
 **Session persistence flow:**
-1. User creates terminal via `cc-persist.newTerminal` command → `TerminalManager.createTerminal()` assigns monotonic index, injects `DTACH_SIGNAL_DIR` and `DTACH_SOCKET_INDEX` env vars
-2. User runs Claude, does `/rename <name>` → VS Code tab title updates
+1. User creates terminal via `cc-persist.newTerminal` command → `TerminalManager.createTerminal()` assigns monotonic index, injects `DTACH_SIGNAL_DIR` and `DTACH_SOCKET_INDEX` env vars. **No `name` is passed to `vscode.window.createTerminal`** — Claude Code 2.1.139+ owns the tab title via OSC escape sequences.
+2. User runs Claude, does `/rename <name>` → Claude emits an OSC title sequence → VS Code updates the tab. The cc-persist `cmd+shift+R` keybind also calls `renameTerminal()` to store the session name in the internal `sessionNames` map for persistence.
 3. `saveState()` writes `{version: 1, terminals: [{name, index}]}` to `~/.cc-persist/<workspaceId>/state.json` (periodic 30s timer + on terminal close/focus)
-4. On VS Code reopen → `restoreTerminals()` reads state, creates terminals, runs `claude --resume '<name>'` via `sendText`
+4. On VS Code reopen → `restoreTerminals()` reads state, creates terminals (no `name` passed), runs `claude --resume '<name>'` via `sendText`. Claude's OSC title then sets the tab title.
+
+**Required VS Code user setting** (for Claude's OSC titles to render in the tab):
+```json
+"terminal.integrated.tabs.title": "${sequence}"
+```
+Without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name.
 
 **Signal notification flow:**
 1. Shell hook writes signal file (e.g., `0.signal`, `1.permission`, `2.error`) to `$TMPDIR/dtach-persist/<workspaceId>/signals/`
@@ -49,6 +55,7 @@ Stress tests (`*.stress.test.ts`) cover: duplicate indices, invalid state schema
 
 ## Key Design Decisions
 
+- **Claude Code owns the tab title** — cc-persist does not pass `name` to `vscode.window.createTerminal` in either the new-terminal or restore paths. Claude Code 2.1.139+ emits OSC title sequences (and OSC 9;4 progress for working/idle icons). cc-persist only persists the session name in its internal map for `--resume`. Requires user's `terminal.integrated.tabs.title` to include `${sequence}` (see Architecture).
 - **Env var names kept as `DTACH_SIGNAL_DIR`/`DTACH_SOCKET_INDEX`** — legacy names preserved so existing shell hooks and cc-overlord don't need updates
 - **`isTransient: true`** on created terminals — VS Code won't restore them natively (the extension handles restore)
 - **Session names validated** before use in `sendText` — regex whitelist prevents shell injection

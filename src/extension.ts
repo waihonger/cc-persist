@@ -72,10 +72,14 @@ export async function activate(
       });
       if (!name) return;
 
-      terminalManager!.renameTerminal(terminal, name);
-      terminal.sendText(`/rename ${name}`);
+      const stored = terminalManager!.renameTerminal(terminal, name);
+      if (!stored) return;
+      if (stored !== name) {
+        vscode.window.showInformationMessage(`Name "${name}" already in use; saved as "${stored}"`);
+      }
+      terminal.sendText(`/rename ${stored}`);
       terminalManager!.saveState();
-      log.appendLine(`User renamed terminal to: ${name}`);
+      log.appendLine(`User renamed terminal to: ${stored}`);
     }),
   );
 
