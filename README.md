@@ -15,7 +15,7 @@ VS Code extension that persists Claude Code terminal sessions across VS Code res
 1. **Open VS Code** — saved terminals auto-restore, each running `claude --dangerously-skip-permissions --resume '<name>'`
 2. **Create terminals** — use `cc-persist.newTerminal` (from command palette). This creates a managed terminal with signal env vars injected
 3. **Start Claude** — run `claude` (or `claude --dangerously-skip-permissions`) in the terminal
-4. **Rename** — `Cmd+Shift+R` while terminal is focused. This does three things: stores the name in the extension, sends `/rename <name>` to Claude, and renames the VS Code tab. State is saved to disk immediately
+4. **Rename** — `Cmd+Shift+R` while terminal is focused. Stores the name in the extension and sends `/rename <name>` to Claude; Claude then emits an OSC title sequence which VS Code uses to update the tab. State is saved to disk immediately. If the name you type is already in use by another tracked terminal, it's auto-suffixed (`name`, `name-2`, `name-3`, …) and a notification shows what was actually stored
 5. **Work across terminals** — switch between terminals, leave Claude working in background ones
 6. **Get notified** — when Claude finishes in a background terminal, the status bar shows `🔔 N awaiting`. Press `Ctrl+Cmd+Option+M` to jump to the highest priority one (permission requests first, then errors, then completions)
 7. **Close VS Code** — state is preserved. Reopen and everything restores
@@ -33,7 +33,9 @@ VS Code extension that persists Claude Code terminal sessions across VS Code res
 ## Requirements
 
 - VS Code 1.85+
-- [Claude Code](https://claude.ai/code) with hooks configured (see below)
+- [Claude Code](https://claude.ai/code) 2.1.139+ — owns the tab title via OSC escape sequences
+- VS Code user setting: `"terminal.integrated.tabs.title": "${sequence}"` — without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name
+- [Claude Code](https://claude.ai/code) hooks configured (see below)
 - Optional: [cc-overlord](https://github.com/waihonger/cc-overlord) for cross-workspace notifications + global hotkey
 
 ## Install
