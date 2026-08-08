@@ -15,8 +15,12 @@ export const _onDidCloseTerminal = new EventEmitter();
 export const _onDidOpenTerminal = new EventEmitter();
 export const _onDidChangeActiveTerminal = new EventEmitter();
 export const _onDidChangeWindowState = new EventEmitter();
+export const _onDidChangeTerminalShellIntegration = new EventEmitter();
 export let _activeTerminal: unknown = undefined;
 export function _setActiveTerminal(t: unknown) { _activeTerminal = t; }
+
+let _configuration: Record<string, unknown> = {};
+export function _setConfiguration(values: Record<string, unknown>) { _configuration = values; }
 
 export const workspace = {
   workspaceFolders: [
@@ -26,10 +30,19 @@ export const workspace = {
       index: 0,
     },
   ],
+  getConfiguration: () => ({
+    get: (key: string, defaultValue?: unknown) => key in _configuration ? _configuration[key] : defaultValue,
+  }),
 };
 
 let _terminals: unknown[] = [];
 export function _setTerminals(t: unknown[]) { _terminals = t; }
+export function _attachShellIntegration(terminal: unknown, executeCommand: (text: string) => unknown = () => {}) {
+  const shellIntegration = { executeCommand };
+  (terminal as { shellIntegration?: unknown }).shellIntegration = shellIntegration;
+  _onDidChangeTerminalShellIntegration.fire({ terminal, shellIntegration });
+  return shellIntegration;
+}
 
 export const window = {
   get terminals() { return _terminals; },
@@ -50,6 +63,7 @@ export const window = {
   onDidOpenTerminal: _onDidOpenTerminal.event,
   onDidChangeActiveTerminal: _onDidChangeActiveTerminal.event,
   onDidChangeWindowState: _onDidChangeWindowState.event,
+  onDidChangeTerminalShellIntegration: _onDidChangeTerminalShellIntegration.event,
   registerTerminalProfileProvider: () => ({ dispose: () => {} }),
   createStatusBarItem: () => ({
     text: "",

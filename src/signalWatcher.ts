@@ -1,12 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { isValidIndex } from "./terminalManager";
+import { isValidIndex, isValidSessionId } from "./terminalManager";
 import type { TerminalManager } from "./terminalManager";
 
 const DEFAULT_STALE_THRESHOLD_HOURS = 4;
-const STALE_THRESHOLD_MS = (Number(process.env.DTACH_SIGNAL_STALE_HOURS) || DEFAULT_STALE_THRESHOLD_HOURS) * 60 * 60 * 1000;
 const POLL_INTERVAL_MS = 10 * 1000; // 10 seconds
+const SID_FILE_RE = /^(\d+)\.sid$/;
 
 const SIGNAL_TYPES = [".signal", ".permission", ".error"] as const;
 type SignalType = "complete" | "permission" | "error";
@@ -34,6 +34,8 @@ export class SignalWatcher {
   private readonly signalDir: string;
   private readonly log: vscode.OutputChannel;
   private readonly terminalManager: TerminalManager;
+  private readonly onSessionId: (index: number, sid: string) => void;
+  private readonly staleThresholdMs: number;
   private readonly signals = new Map<string, Signal>(); // key: "index:type"
   private readonly statusBarItem: vscode.StatusBarItem;
   private watcher: fs.FSWatcher | undefined;
@@ -44,10 +46,17 @@ export class SignalWatcher {
     signalDir: string,
     terminalManager: TerminalManager,
     log: vscode.OutputChannel,
+    onSessionId: (index: number, sid: string) => void = () => {},
+    staleSignalHours = DEFAULT_STALE_THRESHOLD_HOURS,
   ) {
     this.signalDir = signalDir;
     this.terminalManager = terminalManager;
     this.log = log;
+    this.onSessionId = onSessionId;
+    const staleHours = Number.isFinite(staleSignalHours) && staleSignalHours > 0
+      ? staleSignalHours
+      : DEFAULT_STALE_THRESHOLD_HOURS;
+    this.staleThresholdMs = staleHours * 60 * 60 * 1000;
 
     this.statusBarItem = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Left,
@@ -166,6 +175,10 @@ export class SignalWatcher {
       const keysOnDisk = new Set<string>();
 
       for (const file of files) {
+        if (SID_FILE_RE.test(file)) {
+          this.onFile(file);
+          continue;
+        }
         for (const ext of SIGNAL_TYPES) {
           if (file.endsWith(ext)) {
             const index = parseInt(path.basename(file, ext), 10);
@@ -203,6 +216,12 @@ export class SignalWatcher {
   }
 
   private onFile(filename: string): void {
+    const sidMatch = SID_FILE_RE.exec(filename);
+    if (sidMatch) {
+      this.onSessionIdFile(filename, Number(sidMatch[1]));
+      return;
+    }
+
     let signalType: SignalType | null = null;
     let ext = "";
     for (const e of SIGNAL_TYPES) {
@@ -225,7 +244,7 @@ export class SignalWatcher {
       return;
     }
 
-    if (Date.now() - timestamp > STALE_THRESHOLD_MS) {
+    if (Date.now() - timestamp > this.staleThresholdMs) {
       this.deleteFile(index, signalType);
       return;
     }
@@ -245,6 +264,27 @@ export class SignalWatcher {
     this.signals.set(key, { index, timestamp, type: signalType });
     this.log.appendLine(`Signal received: terminal ${index} (${signalType})`);
     this.updateStatusBar();
+  }
+
+  private onSessionIdFile(filename: string, index: number): void {
+    const filePath = path.join(this.signalDir, filename);
+    try {
+      const sid = fs.readFileSync(filePath, "utf8").trim();
+      if (isValidIndex(index) && isValidSessionId(sid)) {
+        this.onSessionId(index, sid);
+        this.log.appendLine(`Session ID received: terminal ${index}`);
+      } else {
+        this.log.appendLine(`Invalid session ID file ignored: ${filename}`);
+      }
+    } catch {
+      // file may have been deleted
+    } finally {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // already gone
+      }
+    }
   }
 
   private clearSignal(index: number, type: SignalType): void {
@@ -270,7 +310,7 @@ export class SignalWatcher {
     const now = Date.now();
     const stale: string[] = [];
     for (const [key, signal] of this.signals) {
-      if (now - signal.timestamp > STALE_THRESHOLD_MS) {
+      if (now - signal.timestamp > this.staleThresholdMs) {
         stale.push(key);
       }
     }

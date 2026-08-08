@@ -36,11 +36,11 @@ describe("TerminalManager", () => {
     it("saves and loads empty state", () => {
       tm.saveState();
       const state = tm.loadState();
-      expect(state.version).toBe(1);
+      expect(state.version).toBe(2);
       expect(state.terminals).toEqual([]);
     });
 
-    it("only persists renamed terminals", () => {
+    it("does not persist terminals before session ID capture or rename", () => {
       const t1 = tm.createTerminal("unrenamed");
       const t2 = tm.createTerminal("also-unrenamed");
       tm.saveState();
@@ -183,6 +183,7 @@ describe("TerminalManager", () => {
     });
 
     it("sends claude --resume command for each terminal", () => {
+      vi.useFakeTimers();
       const t = tm.createTerminal();
       tm.renameTerminal(t, "warroom");
       tm.saveState();
@@ -198,10 +199,12 @@ describe("TerminalManager", () => {
 
       const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
       tm2.restoreTerminals();
+      vi.advanceTimersByTime(3000);
       expect(sendTextCalls.some(c => c.includes("claude --dangerously-skip-permissions --resume 'warroom'"))).toBe(true);
 
       (window as any).createTerminal = origCreateTerminal;
       tm2.disposeAll();
+      vi.useRealTimers();
     });
 
     it("skips terminals with unsafe names on restore", () => {
@@ -255,7 +258,7 @@ describe("TerminalManager", () => {
       expect(state.terminals[0].name).toBe("warroom");
     });
 
-    it("unrenamed terminal is not persisted", () => {
+    it("terminal without a session ID or stored name is not persisted", () => {
       tm.createTerminal("my-session");
       tm.saveState();
       const state = tm.loadState();

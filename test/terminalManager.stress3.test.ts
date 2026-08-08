@@ -214,6 +214,7 @@ describe("STRESS3: Names starting with -- pass validation", () => {
   });
 
   it("sendText wraps in single quotes so -- names are safe in practice", () => {
+    vi.useFakeTimers();
     const stateDir = makeTmpDir();
     const signalBaseDir = makeTmpDir();
 
@@ -232,12 +233,14 @@ describe("STRESS3: Names starting with -- pass validation", () => {
 
     const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     tm.restoreTerminals();
+    vi.advanceTimersByTime(3000);
 
     // Single quotes protect against argument interpretation
     expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume '--help'");
 
     (window as any).createTerminal = origCreateTerminal;
     tm.disposeAll();
+    vi.useRealTimers();
     fs.rmSync(stateDir, { recursive: true, force: true });
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });
@@ -757,6 +760,7 @@ describe("STRESS3: Path-traversal-like names", () => {
   });
 
   it("path-traversal names are safe in resume command due to single quotes", () => {
+    vi.useFakeTimers();
     const stateDir = makeTmpDir();
     const signalBaseDir = makeTmpDir();
     const sendTextCalls: string[] = [];
@@ -774,10 +778,12 @@ describe("STRESS3: Path-traversal-like names", () => {
 
     const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     tm.restoreTerminals();
+    vi.advanceTimersByTime(3000);
     expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume '..'");
 
     (window as any).createTerminal = origCreateTerminal;
     tm.disposeAll();
+    vi.useRealTimers();
     fs.rmSync(stateDir, { recursive: true, force: true });
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });

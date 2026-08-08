@@ -6,6 +6,10 @@ import type { SessionInfo, SessionState } from "./types";
 
 /** Only allow safe characters in session names — prevents shell injection via sendText. */
 const SAFE_NAME_RE = /^[a-zA-Z0-9_.\-][a-zA-Z0-9_.\- ]*[a-zA-Z0-9_.\-]$/;
+export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RESUME_FLAGS_RE = /^[A-Za-z0-9 _.=-]*$/;
+const DEFAULT_RESUME_FLAGS = "--dangerously-skip-permissions";
+const SHELL_INTEGRATION_TIMEOUT_MS = 3000;
 
 /** Delay before cleaning up terminal state on close. Gives setDisposing() time to cancel
  *  during shutdown — terminal close events fire before deactivate(). */
@@ -19,14 +23,26 @@ export function isValidSessionName(name: unknown): boolean {
   return SAFE_NAME_RE.test(name);
 }
 
+export function isValidSessionId(sessionId: unknown): boolean {
+  return typeof sessionId === "string" && SESSION_ID_RE.test(sessionId);
+}
+
 export function isValidIndex(index: unknown): boolean {
   return typeof index === "number" && Number.isInteger(index) && index >= 0 && index < Number.MAX_SAFE_INTEGER;
 }
 
-function isValidEntry(entry: unknown): entry is SessionInfo {
-  if (!entry || typeof entry !== "object") return false;
+function normalizeEntry(entry: unknown, version: number): SessionInfo | null {
+  if (!entry || typeof entry !== "object") return null;
   const e = entry as Record<string, unknown>;
-  return isValidSessionName(e.name) && isValidIndex(e.index);
+  if (!isValidIndex(e.index)) return null;
+
+  const name = typeof e.name === "string" && isValidSessionName(e.name) ? e.name : undefined;
+  const sessionId = version === 2 && typeof e.sessionId === "string" && isValidSessionId(e.sessionId)
+    ? e.sessionId
+    : undefined;
+  if (!sessionId && !name) return null;
+
+  return { index: e.index as number, ...(sessionId ? { sessionId } : {}), ...(name ? { name } : {}) };
 }
 
 export class TerminalManager {
@@ -36,10 +52,16 @@ export class TerminalManager {
   private readonly log: vscode.OutputChannel;
   private readonly terminalToIndex = new Map<vscode.Terminal, number>();
   private readonly indexToTerminal = new Map<number, vscode.Terminal>();
+  private readonly indexToSessionId = new Map<number, string>();
   private readonly sessionNames = new Map<vscode.Terminal, string>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly pendingCleanups = new Map<vscode.Terminal, NodeJS.Timeout>();
+  private readonly pendingCommands = new Map<vscode.Terminal, {
+    timeout: NodeJS.Timeout;
+    listener: vscode.Disposable;
+  }>();
   private readonly cleanupDelayMs: number;
+  private readonly resumeFlags: string;
   private nextIndex = 0;
   private disposing = false;
   private restored = false;
@@ -51,12 +73,19 @@ export class TerminalManager {
     startDir: string,
     log: vscode.OutputChannel,
     cleanupDelayMs = 0,
+    resumeFlags = DEFAULT_RESUME_FLAGS,
   ) {
     this.stateDir = stateDir;
     this.signalBaseDir = signalBaseDir;
     this.startDir = startDir;
     this.log = log;
     this.cleanupDelayMs = cleanupDelayMs;
+    if (typeof resumeFlags === "string" && RESUME_FLAGS_RE.test(resumeFlags)) {
+      this.resumeFlags = resumeFlags;
+    } else {
+      this.resumeFlags = DEFAULT_RESUME_FLAGS;
+      this.log.appendLine("Invalid resumeFlags setting — using default");
+    }
   }
 
   private get statePath(): string {
@@ -73,16 +102,18 @@ export class TerminalManager {
       const raw = fs.readFileSync(this.statePath, "utf8");
       this.log.appendLine(`State file contents: ${raw}`);
       const data = JSON.parse(raw);
-      if (data && data.version === 1 && Array.isArray(data.terminals)) {
-        const valid = data.terminals.filter((e: unknown) => isValidEntry(e));
+      if (data && (data.version === 1 || data.version === 2) && Array.isArray(data.terminals)) {
+        const valid = data.terminals
+          .map((e: unknown) => normalizeEntry(e, data.version))
+          .filter((e: SessionInfo | null): e is SessionInfo => e !== null);
         this.log.appendLine(`Valid entries: ${valid.length}/${data.terminals.length}`);
-        return { version: 1, terminals: valid };
+        return { version: 2, terminals: valid };
       }
       this.log.appendLine(`State schema mismatch: version=${data?.version}, isArray=${Array.isArray(data?.terminals)}`);
     } catch (err) {
       this.log.appendLine(`Failed to load state: ${err}`);
     }
-    return { version: 1, terminals: [] };
+    return { version: 2, terminals: [] };
   }
 
   saveState(): void {
@@ -91,13 +122,14 @@ export class TerminalManager {
     for (const [terminal, index] of this.terminalToIndex) {
       const name = this.sessionNames.get(terminal) ?? terminal.name;
       names[index] = name;
+      const sessionId = this.indexToSessionId.get(index);
       const sessionName = this.sessionNames.get(terminal);
-      if (!sessionName) continue; // Only persist renamed terminals
-      terminals.push({ name: sessionName, index });
+      if (!sessionId && !sessionName) continue;
+      terminals.push({ index, ...(sessionId ? { sessionId } : {}), ...(sessionName ? { name: sessionName } : {}) });
     }
     terminals.sort((a, b) => a.index - b.index);
 
-    const state: SessionState = { version: 1, terminals };
+    const state: SessionState = { version: 2, terminals };
     try {
       fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
       fs.writeFileSync(this.statePath, JSON.stringify(state), { mode: 0o600 });
@@ -135,7 +167,7 @@ export class TerminalManager {
 
     this.terminalToIndex.set(terminal, index);
     this.indexToTerminal.set(index, terminal);
-    terminal.sendText(`export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${index}'`);
+    this.sendCommand(terminal, `export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${index}'`);
     this.log.appendLine(`Created terminal ${index}`);
     return terminal;
   }
@@ -179,9 +211,11 @@ export class TerminalManager {
       this.terminalToIndex.set(terminal, info.index);
       this.indexToTerminal.set(info.index, terminal);
 
-      this.sessionNames.set(terminal, info.name);
-      terminal.sendText(`export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${info.index}' && claude --dangerously-skip-permissions --resume '${info.name}'`);
-      this.log.appendLine(`Restored terminal ${info.index}: ${info.name}`);
+      if (info.sessionId) this.indexToSessionId.set(info.index, info.sessionId);
+      if (info.name) this.sessionNames.set(terminal, info.name);
+      const handle = info.sessionId ?? info.name!;
+      this.sendCommand(terminal, `export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${info.index}' && claude ${this.resumeFlags} --resume '${handle}'`);
+      this.log.appendLine(`Restored terminal ${info.index}: ${info.name ?? info.sessionId}`);
       restored.push(terminal);
     }
 
@@ -207,7 +241,9 @@ export class TerminalManager {
       this.pendingCleanups.delete(terminal);
       this.terminalToIndex.delete(terminal);
       this.indexToTerminal.delete(index);
+      this.indexToSessionId.delete(index);
       this.sessionNames.delete(terminal);
+      this.clearPendingCommand(terminal);
       this.saveState();
       this.log.appendLine(`Terminal ${index} closed by user — state saved, ${this.terminalToIndex.size} remaining`);
     };
@@ -250,6 +286,15 @@ export class TerminalManager {
     const terminal = this.indexToTerminal.get(index);
     if (!terminal) return undefined;
     return this.sessionNames.get(terminal) ?? terminal.name;
+  }
+
+  setSessionId(index: number, sid: string): void {
+    if (!isValidIndex(index) || !isValidSessionId(sid)) {
+      this.log.appendLine(`Ignoring invalid session ID for terminal ${index}: ${sid}`);
+      return;
+    }
+    this.indexToSessionId.set(index, sid);
+    this.saveState();
   }
 
   renameTerminal(terminal: vscode.Terminal, name: string): string | null {
@@ -317,17 +362,57 @@ export class TerminalManager {
     this.log.appendLine(`Disposing — cancelled ${cancelledCount} pending cleanups, state saved`);
   }
 
+  private sendCommand(terminal: vscode.Terminal, text: string): void {
+    if (terminal.shellIntegration) {
+      terminal.shellIntegration.executeCommand(text);
+      return;
+    }
+
+    const listener = vscode.window.onDidChangeTerminalShellIntegration((event) => {
+      if (event.terminal !== terminal) return;
+      this.clearPendingCommand(terminal);
+      event.shellIntegration.executeCommand(text);
+    });
+    const timeout = setTimeout(() => {
+      this.clearPendingCommand(terminal);
+      terminal.sendText(text);
+    }, SHELL_INTEGRATION_TIMEOUT_MS);
+    this.pendingCommands.set(terminal, { timeout, listener });
+
+    const currentShellIntegration = this.getShellIntegration(terminal);
+    if (currentShellIntegration) {
+      this.clearPendingCommand(terminal);
+      currentShellIntegration.executeCommand(text);
+    }
+  }
+
+  private getShellIntegration(terminal: vscode.Terminal): vscode.TerminalShellIntegration | undefined {
+    return terminal.shellIntegration;
+  }
+
+  private clearPendingCommand(terminal: vscode.Terminal): void {
+    const pending = this.pendingCommands.get(terminal);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    pending.listener.dispose();
+    this.pendingCommands.delete(terminal);
+  }
+
   disposeAll(): void {
     for (const timeout of this.pendingCleanups.values()) {
       clearTimeout(timeout);
     }
     this.pendingCleanups.clear();
+    for (const terminal of this.pendingCommands.keys()) {
+      this.clearPendingCommand(terminal);
+    }
     for (const d of this.disposables) {
       d.dispose();
     }
     this.disposables.length = 0;
     this.terminalToIndex.clear();
     this.indexToTerminal.clear();
+    this.indexToSessionId.clear();
     this.sessionNames.clear();
   }
 }

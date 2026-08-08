@@ -1,6 +1,7 @@
 export interface SessionInfo {
-  name: string;
   index: number;
+  sessionId?: string;
+  name?: string;
 }
 
 export interface SessionState {

@@ -912,6 +912,7 @@ describe("STRESS2: NEW -- sendText shell injection via session name in restoreTe
   });
 
   it("name with single quotes cannot escape the resume command", () => {
+    vi.useFakeTimers();
     const sendTextCalls: string[] = [];
     const origCreateTerminal = window.createTerminal;
     (window as any).createTerminal = (opts: any) => {
@@ -930,12 +931,14 @@ describe("STRESS2: NEW -- sendText shell injection via session name in restoreTe
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
+    vi.advanceTimersByTime(3000);
 
     expect(restored).toHaveLength(1);
     expect(sendTextCalls).toHaveLength(1);
     expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume 'legit-session'");
 
     (window as any).createTerminal = origCreateTerminal;
+    vi.useRealTimers();
   });
 
   it("name with dollar sign and backticks cannot reach sendText", () => {

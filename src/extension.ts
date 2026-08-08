@@ -12,6 +12,11 @@ export async function activate(
   context.subscriptions.push(log);
   log.appendLine("Activating cc-persist");
 
+  const config = vscode.workspace.getConfiguration("cc-persist");
+  const resumeFlags = config.get<string>("resumeFlags", "--dangerously-skip-permissions");
+  const staleSignalHours = config.get<number>("staleSignalHours", 4);
+  const closeRogueTerminals = config.get<boolean>("closeRogueTerminals", true);
+
   const stateDir = resolveStateDir();
   const signalBaseDir = resolveSignalBaseDir();
   const startDir = resolveStartDirectory();
@@ -21,7 +26,7 @@ export async function activate(
   log.appendLine(`Signal dir: ${sigDir}`);
   log.appendLine(`Start dir: ${startDir}`);
 
-  terminalManager = new TerminalManager(stateDir, signalBaseDir, startDir, log, CLEANUP_DELAY_MS);
+  terminalManager = new TerminalManager(stateDir, signalBaseDir, startDir, log, CLEANUP_DELAY_MS, resumeFlags);
   try {
     terminalManager.writeWorkspaceMetadata();
   } catch (err) {
@@ -39,7 +44,13 @@ export async function activate(
   });
 
   // Signal watcher for Claude Code task completion notifications
-  const signalWatcher = new SignalWatcher(sigDir, terminalManager, log);
+  const signalWatcher = new SignalWatcher(
+    sigDir,
+    terminalManager,
+    log,
+    (index, sid) => terminalManager!.setSessionId(index, sid),
+    staleSignalHours,
+  );
   signalWatcher.start(context);
   context.subscriptions.push({ dispose: () => signalWatcher.dispose() });
 
@@ -63,7 +74,7 @@ export async function activate(
       }
 
       const name = await vscode.window.showInputBox({
-        prompt: "Session name (used for claude --resume)",
+        prompt: "Session display name (optional; session ID is used for resume)",
         placeHolder: "e.g. warroom",
         validateInput: (value) => {
           if (!value) return "Name is required";
@@ -89,10 +100,12 @@ export async function activate(
     log.appendLine(`Found ${state.terminals.length} saved session(s) — queued for restore`);
 
     // Close any pre-existing rogue non-managed terminals
-    for (const t of vscode.window.terminals) {
-      if (!terminalManager.isTracked(t)) {
-        log.appendLine("Closing pre-existing rogue terminal");
-        t.dispose();
+    if (closeRogueTerminals) {
+      for (const t of vscode.window.terminals) {
+        if (!terminalManager.isTracked(t)) {
+          log.appendLine("Closing pre-existing rogue terminal");
+          t.dispose();
+        }
       }
     }
 
@@ -114,8 +127,8 @@ export async function activate(
     // Fallback timeout in case no rogue terminal is created.
     const rogueWatcher = vscode.window.onDidOpenTerminal((t) => {
       if (!terminalManager!.isTracked(t)) {
-        log.appendLine("Closing rogue terminal — triggering restore");
-        t.dispose();
+        log.appendLine("Rogue terminal detected — triggering restore");
+        if (closeRogueTerminals) t.dispose();
         doRestore();
       }
     });

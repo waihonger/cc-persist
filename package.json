@@ -1,12 +1,12 @@
 {
   "name": "cc-persist",
   "displayName": "cc-persist",
-  "description": "Persistent Claude Code terminal sessions via named session resume",
+  "description": "Persistent Claude Code terminal sessions via session ID resume",
   "version": "0.1.0",
   "publisher": "fongy",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "Other"
@@ -19,6 +19,26 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "cc-persist",
+      "properties": {
+        "cc-persist.resumeFlags": {
+          "type": "string",
+          "default": "--dangerously-skip-permissions",
+          "description": "Flags passed to Claude Code when restoring a saved session."
+        },
+        "cc-persist.staleSignalHours": {
+          "type": "number",
+          "default": 4,
+          "description": "Hours before unattended completion, permission, and error signals are removed."
+        },
+        "cc-persist.closeRogueTerminals": {
+          "type": "boolean",
+          "default": true,
+          "description": "Close untracked terminals that VS Code creates while saved Claude sessions are being restored."
+        }
+      }
+    },
     "commands": [
       {
         "command": "cc-persist.newTerminal",
@@ -58,7 +78,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.93.0",
     "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.21.0",
     "typescript": "^5.5.0",

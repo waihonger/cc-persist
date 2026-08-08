@@ -240,6 +240,7 @@ describe("STRESS: Terminal name changes between create and save", () => {
   });
 
   it("rename causes resume command to use new name", () => {
+    vi.useFakeTimers();
     const t = tm.createTerminal("original-session");
     tm.renameTerminal(t, "original-session");
     tm.renameTerminal(t, "renamed-session");
@@ -256,10 +257,12 @@ describe("STRESS: Terminal name changes between create and save", () => {
 
     const tm2 = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     tm2.restoreTerminals();
+    vi.advanceTimersByTime(3000);
     expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume 'renamed-session'");
 
     (window as any).createTerminal = origCreateTerminal;
     tm2.disposeAll();
+    vi.useRealTimers();
   });
 });
 
@@ -286,14 +289,14 @@ describe("STRESS: State file with wrong schema", () => {
     expect(state.terminals).toHaveLength(0);
   });
 
-  it("version 2 — rejected, treated as empty", () => {
+  it("version 2 name-only entry is accepted", () => {
     writeState(stateDir, {
       version: 2,
       terminals: [{ name: "test", index: 0 }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
-    expect(state.terminals).toHaveLength(0);
+    expect(state.terminals).toEqual([{ index: 0, name: "test" }]);
   });
 
   it("terminals is an object, not array", () => {
