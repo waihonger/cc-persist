@@ -167,7 +167,10 @@ export class TerminalManager {
 
     this.terminalToIndex.set(terminal, index);
     this.indexToTerminal.set(index, terminal);
-    this.sendCommand(terminal, `export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${index}'`);
+    // Immediate sendText, not sendCommand: the env is already injected via
+    // createTerminal options, this line is belt-and-braces — a delayed fallback
+    // could type into a claude the user has already started in this terminal.
+    terminal.sendText(`export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${index}'`);
     this.log.appendLine(`Created terminal ${index}`);
     return terminal;
   }
@@ -291,6 +294,13 @@ export class TerminalManager {
   setSessionId(index: number, sid: string): void {
     if (!isValidIndex(index) || !isValidSessionId(sid)) {
       this.log.appendLine(`Ignoring invalid session ID for terminal ${index}: ${sid}`);
+      return;
+    }
+    // Only accept session IDs for live tracked terminals — a stale .sid for an
+    // unknown index must not trigger a save (saving with empty maps would
+    // overwrite state.json and wipe every saved session).
+    if (!this.indexToTerminal.has(index)) {
+      this.log.appendLine(`Ignoring session ID for untracked terminal ${index}`);
       return;
     }
     this.indexToSessionId.set(index, sid);

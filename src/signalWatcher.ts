@@ -7,6 +7,8 @@ import type { TerminalManager } from "./terminalManager";
 const DEFAULT_STALE_THRESHOLD_HOURS = 4;
 const POLL_INTERVAL_MS = 10 * 1000; // 10 seconds
 const SID_FILE_RE = /^(\d+)\.sid$/;
+/** Grace period for a .sid file whose content is still invalid (writer mid-write). */
+const SID_RETRY_WINDOW_MS = 60 * 1000;
 
 const SIGNAL_TYPES = [".signal", ".permission", ".error"] as const;
 type SignalType = "complete" | "permission" | "error";
@@ -131,10 +133,9 @@ export class SignalWatcher {
 
   markRestoreComplete(): void {
     this.restoreComplete = true;
-    const gotoPath = path.join(this.signalDir, "goto");
-    if (fs.existsSync(gotoPath)) {
-      this.onGotoFile();
-    }
+    // Full rescan: picks up goto plus any .sid files that were deferred while
+    // restore was pending (ingesting them earlier would race state loading).
+    this.scanSignals();
   }
 
   onTerminalClosed(index: number): void {
@@ -176,7 +177,7 @@ export class SignalWatcher {
 
       for (const file of files) {
         if (SID_FILE_RE.test(file)) {
-          this.onFile(file);
+          if (this.restoreComplete) this.onFile(file);
           continue;
         }
         for (const ext of SIGNAL_TYPES) {
@@ -218,7 +219,9 @@ export class SignalWatcher {
   private onFile(filename: string): void {
     const sidMatch = SID_FILE_RE.exec(filename);
     if (sidMatch) {
-      this.onSessionIdFile(filename, Number(sidMatch[1]));
+      // Deferred until restore completes — ingesting earlier would persist state
+      // before the terminal maps are populated, wiping saved sessions.
+      if (this.restoreComplete) this.onSessionIdFile(filename, Number(sidMatch[1]));
       return;
     }
 
@@ -274,16 +277,26 @@ export class SignalWatcher {
         this.onSessionId(index, sid);
         this.log.appendLine(`Session ID received: terminal ${index}`);
       } else {
+        // The hook's `>` redirection truncates before writing, so a fresh file may
+        // be empty or partial — leave it for the next poll instead of unlinking
+        // (deleting here would strand the writer on an unlinked inode and lose the
+        // UUID for good). Only clean up files that stayed invalid past the window.
+        let ageMs = Infinity;
+        try {
+          ageMs = Date.now() - fs.statSync(filePath).mtimeMs;
+        } catch {
+          return; // already gone
+        }
+        if (ageMs < SID_RETRY_WINDOW_MS) return;
         this.log.appendLine(`Invalid session ID file ignored: ${filename}`);
       }
     } catch {
       // file may have been deleted
-    } finally {
-      try {
-        fs.unlinkSync(filePath);
-      } catch {
-        // already gone
-      }
+    }
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // already gone
     }
   }
 

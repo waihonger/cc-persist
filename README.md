@@ -36,6 +36,7 @@ VS Code extension that persists Claude Code terminal sessions across VS Code res
 - [Claude Code](https://claude.ai/code) 2.1.139+ — owns the tab title via OSC escape sequences
 - VS Code user setting: `"terminal.integrated.tabs.title": "${sequence}"` — without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name
 - [Claude Code](https://claude.ai/code) hooks configured (see below)
+- `jq` (`brew install jq`) — the `SessionStart` hook uses it to extract the session UUID; without it, session-ID persistence silently degrades to name-only
 - Optional: [cc-overlord](https://github.com/waihonger/cc-overlord) for cross-workspace notifications + global hotkey
 
 ## Install
@@ -64,7 +65,7 @@ Add to `~/.claude/settings.json`:
 {
   "hooks": {
     "SessionStart": [
-      { "matcher": "", "hooks": [{ "type": "command", "command": "tee stdin | jq -r .session_id > \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid\"", "timeout": 1000 }] }
+      { "matcher": "", "hooks": [{ "type": "command", "command": "test -n \"$DTACH_SIGNAL_DIR\" && test -n \"$DTACH_SOCKET_INDEX\" && jq -r .session_id > \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid.tmp\" && mv \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid.tmp\" \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid\" || true", "timeout": 1000 }] }
     ],
     "Stop": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "test -n \"$DTACH_SIGNAL_DIR\" && test -n \"$DTACH_SOCKET_INDEX\" && touch \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.signal\" || true", "timeout": 1000 }] }
@@ -79,7 +80,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-The `SessionStart` hook captures the session UUID on every start, resume, and clear. The extension consumes the `.sid` file without displaying it in the status bar.
+The `SessionStart` hook captures the session UUID on every start, resume, and clear. It writes to a `.tmp` file and renames it so the watcher never reads a partial write; the extension consumes the `.sid` file without displaying it in the status bar.
 
 Three notification signal types:
 - **Stop** → `.signal` file → "done" (yellow in status bar)

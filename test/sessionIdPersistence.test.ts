@@ -86,6 +86,19 @@ describe("session ID persistence", () => {
     expect(lines.some((line) => line.includes("Ignoring invalid session ID"))).toBe(true);
   });
 
+  it("setSessionId ignores untracked indexes and does not overwrite state", () => {
+    writeState(stateDir, {
+      version: 2,
+      terminals: [{ index: 0, sessionId: OTHER_SID }],
+    });
+    const before = fs.readFileSync(path.join(stateDir, "state.json"), "utf8");
+
+    tm.setSessionId(3, SID); // no terminal tracked at index 3 — stale .sid scenario
+
+    expect(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).toBe(before);
+    expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: OTHER_SID }]);
+  });
+
   it("saveState persists unnamed terminals that have a sessionId", () => {
     tm.createTerminal();
     tm.setSessionId(0, SID);
@@ -192,7 +205,7 @@ describe("session ID persistence", () => {
 });
 
 describe("SignalWatcher session IDs", () => {
-  it(".sid file ingested, callback fired, file deleted, not shown in status bar", () => {
+  function makeWatcherFixture() {
     const stateDir = makeTmpDir();
     const signalBaseDir = makeTmpDir();
     const signalDir = makeTmpDir();
@@ -209,22 +222,56 @@ describe("SignalWatcher session IDs", () => {
       hide: vi.fn(),
       dispose: vi.fn(),
     });
-    const sidPath = path.join(signalDir, "7.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
     const watcher = new SignalWatcher(signalDir, tm, makeLog().channel, callback);
     const context = { subscriptions: [] } as unknown as import("vscode").ExtensionContext;
+    return {
+      signalDir, callback, show, watcher, context,
+      cleanup: () => {
+        watcher.dispose();
+        tm.disposeAll();
+        (window as any).createStatusBarItem = originalCreateStatusBarItem;
+        fs.rmSync(stateDir, { recursive: true, force: true });
+        fs.rmSync(signalBaseDir, { recursive: true, force: true });
+        fs.rmSync(signalDir, { recursive: true, force: true });
+      },
+    };
+  }
 
-    watcher.start(context);
+  it(".sid ingestion deferred until restore completes, then file deleted, not shown in status bar", () => {
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "7.sid");
+    fs.writeFileSync(sidPath, `${SID}\n`);
 
-    expect(callback).toHaveBeenCalledWith(7, SID);
+    f.watcher.start(f.context);
+    expect(f.callback).not.toHaveBeenCalled(); // restore pending — must not ingest yet
+    expect(fs.existsSync(sidPath)).toBe(true);
+
+    f.watcher.markRestoreComplete();
+    expect(f.callback).toHaveBeenCalledWith(7, SID);
     expect(fs.existsSync(sidPath)).toBe(false);
-    expect(show).not.toHaveBeenCalled();
+    expect(f.show).not.toHaveBeenCalled();
 
-    watcher.dispose();
-    tm.disposeAll();
-    (window as any).createStatusBarItem = originalCreateStatusBarItem;
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-    fs.rmSync(signalDir, { recursive: true, force: true });
+    f.cleanup();
+  });
+
+  it("partial .sid file is kept and ingested once the writer finishes", () => {
+    vi.useFakeTimers();
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "3.sid");
+    fs.writeFileSync(sidPath, ""); // truncate-then-write race: watcher sees empty file
+
+    f.watcher.start(f.context);
+    f.watcher.markRestoreComplete();
+    expect(f.callback).not.toHaveBeenCalled();
+    expect(fs.existsSync(sidPath)).toBe(true); // NOT deleted — writer may still be mid-write
+
+    fs.writeFileSync(sidPath, `${SID}\n`);
+    vi.advanceTimersByTime(10_000); // next poll picks it up
+
+    expect(f.callback).toHaveBeenCalledWith(3, SID);
+    expect(fs.existsSync(sidPath)).toBe(false);
+
+    vi.useRealTimers();
+    f.cleanup();
   });
 });
