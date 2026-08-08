@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory, signalDir } from "./config";
 import { SignalWatcher } from "./signalWatcher";
-import { TerminalManager, isValidSessionName, CLEANUP_DELAY_MS } from "./terminalManager";
+import { TerminalManager, isValidSessionName, CLEANUP_DELAY_MS, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
 
@@ -13,7 +13,7 @@ export async function activate(
   log.appendLine("Activating cc-persist");
 
   const config = vscode.workspace.getConfiguration("cc-persist");
-  const resumeFlags = config.get<string>("resumeFlags", "--dangerously-skip-permissions");
+  const resumeFlags = config.get<string>("resumeFlags", DEFAULT_RESUME_FLAGS);
   const staleSignalHours = config.get<number>("staleSignalHours", 4);
   const closeRogueTerminals = config.get<boolean>("closeRogueTerminals", true);
 

@@ -36,7 +36,8 @@ export class SignalWatcher {
   private readonly signalDir: string;
   private readonly log: vscode.OutputChannel;
   private readonly terminalManager: TerminalManager;
-  private readonly onSessionId: (index: number, sid: string) => void;
+  /** Returns true when the sid was persisted — false keeps the .sid file for retry. */
+  private readonly onSessionId: (index: number, sid: string) => boolean;
   private readonly staleThresholdMs: number;
   private readonly signals = new Map<string, Signal>(); // key: "index:type"
   private readonly statusBarItem: vscode.StatusBarItem;
@@ -48,7 +49,7 @@ export class SignalWatcher {
     signalDir: string,
     terminalManager: TerminalManager,
     log: vscode.OutputChannel,
-    onSessionId: (index: number, sid: string) => void = () => {},
+    onSessionId: (index: number, sid: string) => boolean = () => false,
     staleSignalHours = DEFAULT_STALE_THRESHOLD_HOURS,
   ) {
     this.signalDir = signalDir;
@@ -271,27 +272,30 @@ export class SignalWatcher {
 
   private onSessionIdFile(filename: string, index: number): void {
     const filePath = path.join(this.signalDir, filename);
+    let done = false;
     try {
       const sid = fs.readFileSync(filePath, "utf8").trim();
       if (isValidIndex(index) && isValidSessionId(sid)) {
-        this.onSessionId(index, sid);
-        this.log.appendLine(`Session ID received: terminal ${index}`);
-      } else {
-        // The hook's `>` redirection truncates before writing, so a fresh file may
-        // be empty or partial — leave it for the next poll instead of unlinking
-        // (deleting here would strand the writer on an unlinked inode and lose the
-        // UUID for good). Only clean up files that stayed invalid past the window.
-        let ageMs = Infinity;
-        try {
-          ageMs = Date.now() - fs.statSync(filePath).mtimeMs;
-        } catch {
-          return; // already gone
-        }
-        if (ageMs < SID_RETRY_WINDOW_MS) return;
-        this.log.appendLine(`Invalid session ID file ignored: ${filename}`);
+        done = this.onSessionId(index, sid);
+        if (done) this.log.appendLine(`Session ID received: terminal ${index}`);
       }
     } catch {
-      // file may have been deleted
+      return; // file may have been deleted
+    }
+    if (!done) {
+      // Not ingested yet: either the writer is mid-write (the hook's `>` truncates
+      // before writing, so a fresh file can be empty/partial), the index isn't
+      // tracked, or the state save failed. Leave the file so the next poll retries
+      // — unlinking now would lose the UUID for good. Clean up only once it has
+      // sat unprocessed past the retry window.
+      let ageMs = Infinity;
+      try {
+        ageMs = Date.now() - fs.statSync(filePath).mtimeMs;
+      } catch {
+        return; // already gone
+      }
+      if (ageMs < SID_RETRY_WINDOW_MS) return;
+      this.log.appendLine(`Unprocessed session ID file discarded: ${filename}`);
     }
     try {
       fs.unlinkSync(filePath);

@@ -210,7 +210,7 @@ describe("SignalWatcher session IDs", () => {
     const signalBaseDir = makeTmpDir();
     const signalDir = makeTmpDir();
     const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-    const callback = vi.fn();
+    const callback = vi.fn(() => true);
     const show = vi.fn();
     const originalCreateStatusBarItem = window.createStatusBarItem;
     (window as any).createStatusBarItem = () => ({
@@ -251,6 +251,28 @@ describe("SignalWatcher session IDs", () => {
     expect(fs.existsSync(sidPath)).toBe(false);
     expect(f.show).not.toHaveBeenCalled();
 
+    f.cleanup();
+  });
+
+  it("sid file kept for retry when persistence fails, discarded after the window", () => {
+    vi.useFakeTimers();
+    const f = makeWatcherFixture();
+    f.callback.mockReturnValue(false); // persistence failing (untracked index / disk error)
+    const sidPath = path.join(f.signalDir, "5.sid");
+    fs.writeFileSync(sidPath, `${SID}\n`);
+
+    f.watcher.start(f.context);
+    f.watcher.markRestoreComplete();
+    expect(f.callback).toHaveBeenCalledWith(5, SID);
+    expect(fs.existsSync(sidPath)).toBe(true); // kept — next poll retries
+
+    const past = new Date(Date.now() - 61_000);
+    fs.utimesSync(sidPath, past, past); // sat unprocessed past the retry window
+    vi.advanceTimersByTime(10_000);
+
+    expect(fs.existsSync(sidPath)).toBe(false); // discarded as garbage
+
+    vi.useRealTimers();
     f.cleanup();
   });
 

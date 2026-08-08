@@ -8,7 +8,8 @@ import type { SessionInfo, SessionState } from "./types";
 const SAFE_NAME_RE = /^[a-zA-Z0-9_.\-][a-zA-Z0-9_.\- ]*[a-zA-Z0-9_.\-]$/;
 export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RESUME_FLAGS_RE = /^[A-Za-z0-9 _.=-]*$/;
-const DEFAULT_RESUME_FLAGS = "--dangerously-skip-permissions";
+/** Single source of truth in code; package.json's declared default must match. */
+export const DEFAULT_RESUME_FLAGS = "--dangerously-skip-permissions";
 const SHELL_INTEGRATION_TIMEOUT_MS = 3000;
 
 /** Delay before cleaning up terminal state on close. Gives setDisposing() time to cancel
@@ -116,7 +117,7 @@ export class TerminalManager {
     return { version: 2, terminals: [] };
   }
 
-  saveState(): void {
+  saveState(): boolean {
     const terminals: SessionInfo[] = [];
     const names: Record<string, string> = {};
     for (const [terminal, index] of this.terminalToIndex) {
@@ -130,10 +131,12 @@ export class TerminalManager {
     terminals.sort((a, b) => a.index - b.index);
 
     const state: SessionState = { version: 2, terminals };
+    let saved = false;
     try {
       fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
       fs.writeFileSync(this.statePath, JSON.stringify(state), { mode: 0o600 });
       this.log.appendLine(`Saved state: ${terminals.length} terminal(s)`);
+      saved = true;
     } catch (err) {
       this.log.appendLine(`Failed to save state: ${err}`);
     }
@@ -149,6 +152,7 @@ export class TerminalManager {
     } catch (err) {
       this.log.appendLine(`Failed to write names.json: ${err}`);
     }
+    return saved;
   }
 
   createTerminal(_unusedName?: string): vscode.Terminal {
@@ -291,20 +295,22 @@ export class TerminalManager {
     return this.sessionNames.get(terminal) ?? terminal.name;
   }
 
-  setSessionId(index: number, sid: string): void {
+  /** Returns true only when the session ID was accepted AND persisted to disk —
+   *  the caller keeps the source .sid file for retry on false. */
+  setSessionId(index: number, sid: string): boolean {
     if (!isValidIndex(index) || !isValidSessionId(sid)) {
       this.log.appendLine(`Ignoring invalid session ID for terminal ${index}: ${sid}`);
-      return;
+      return false;
     }
     // Only accept session IDs for live tracked terminals — a stale .sid for an
     // unknown index must not trigger a save (saving with empty maps would
     // overwrite state.json and wipe every saved session).
     if (!this.indexToTerminal.has(index)) {
       this.log.appendLine(`Ignoring session ID for untracked terminal ${index}`);
-      return;
+      return false;
     }
     this.indexToSessionId.set(index, sid);
-    this.saveState();
+    return this.saveState();
   }
 
   renameTerminal(terminal: vscode.Terminal, name: string): string | null {
@@ -388,16 +394,6 @@ export class TerminalManager {
       terminal.sendText(text);
     }, SHELL_INTEGRATION_TIMEOUT_MS);
     this.pendingCommands.set(terminal, { timeout, listener });
-
-    const currentShellIntegration = this.getShellIntegration(terminal);
-    if (currentShellIntegration) {
-      this.clearPendingCommand(terminal);
-      currentShellIntegration.executeCommand(text);
-    }
-  }
-
-  private getShellIntegration(terminal: vscode.Terminal): vscode.TerminalShellIntegration | undefined {
-    return terminal.shellIntegration;
   }
 
   private clearPendingCommand(terminal: vscode.Terminal): void {
