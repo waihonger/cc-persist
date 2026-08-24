@@ -313,6 +313,18 @@ export class TerminalManager {
     return this.saveState();
   }
 
+  /** Adopt a terminal cc-persist didn't create and persist its session ID.
+   *  Returns true only when accepted AND persisted. */
+  adoptWithSessionId(terminal: vscode.Terminal, sid: string): boolean {
+    if (!isValidSessionId(sid)) {
+      this.log.appendLine(`Ignoring invalid session ID for terminal ${terminal.name}: ${sid}`);
+      return false;
+    }
+    const index = this.terminalToIndex.get(terminal) ?? this.adoptTerminal(terminal);
+    this.indexToSessionId.set(index, sid);
+    return this.saveState();
+  }
+
   renameTerminal(terminal: vscode.Terminal, name: string): string | null {
     if (!isValidSessionName(name)) return null;
     if (!this.terminalToIndex.has(terminal)) {
@@ -340,11 +352,12 @@ export class TerminalManager {
     }
   }
 
-  private adoptTerminal(terminal: vscode.Terminal): void {
+  private adoptTerminal(terminal: vscode.Terminal): number {
     const index = this.nextIndex++;
     this.terminalToIndex.set(terminal, index);
     this.indexToTerminal.set(index, terminal);
     this.log.appendLine(`Adopted terminal ${index}: ${terminal.name}`);
+    return index;
   }
 
   getSessionName(terminal: vscode.Terminal): string | undefined {

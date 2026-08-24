@@ -1,9 +1,27 @@
 import * as vscode from "vscode";
 import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory, signalDir } from "./config";
+import { findOwningShellPid, snapshotProcesses } from "./pidResolver";
 import { SignalWatcher } from "./signalWatcher";
 import { TerminalManager, isValidSessionName, CLEANUP_DELAY_MS, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
+
+async function adoptPidSession(claudePid: number, sid: string): Promise<boolean> {
+  if (!terminalManager) return false;
+  const terminals = vscode.window.terminals;
+  const pidPairs = await Promise.all(terminals.map(async (terminal) => [terminal, await terminal.processId] as const));
+  const shellPids = new Set(
+    pidPairs
+      .filter(([, pid]) => typeof pid === "number")
+      .map(([, pid]) => pid as number),
+  );
+  const procs = await snapshotProcesses();
+  const shellPid = findOwningShellPid(claudePid, procs, shellPids);
+  if (shellPid === null) return false;
+  const owner = pidPairs.find(([, pid]) => pid === shellPid)?.[0];
+  if (!owner) return false;
+  return terminalManager.adoptWithSessionId(owner, sid);
+}
 
 export async function activate(
   context: vscode.ExtensionContext,
@@ -21,6 +39,9 @@ export async function activate(
   const signalBaseDir = resolveSignalBaseDir();
   const startDir = resolveStartDirectory();
   const sigDir = signalDir(signalBaseDir);
+
+  context.environmentVariableCollection.replace("DTACH_SIGNAL_DIR", sigDir);
+  context.environmentVariableCollection.description = "cc-persist: session tracking for all terminals";
 
   log.appendLine(`State dir: ${stateDir}`);
   log.appendLine(`Signal dir: ${sigDir}`);
@@ -50,6 +71,7 @@ export async function activate(
     log,
     (index, sid) => terminalManager!.setSessionId(index, sid),
     staleSignalHours,
+    adoptPidSession,
   );
   signalWatcher.start(context);
   context.subscriptions.push({ dispose: () => signalWatcher.dispose() });

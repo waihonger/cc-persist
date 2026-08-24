@@ -13,7 +13,7 @@ VS Code extension that persists Claude Code terminal sessions across VS Code res
 ### Daily usage
 
 1. **Open VS Code** — saved terminals auto-restore, each running `claude --dangerously-skip-permissions --resume '<session-id>'`
-2. **Create terminals** — use `cc-persist.newTerminal` (from command palette). This creates a managed terminal with signal env vars injected
+2. **Create terminals** — use `cc-persist.newTerminal` (from command palette) for managed terminals with notifications, or VS Code's `+` button for plain terminals that still get automatic session persistence
 3. **Start Claude** — run `claude` (or `claude --dangerously-skip-permissions`) in the terminal
 4. **Optionally rename** — `Cmd+Shift+R` while terminal is focused. This is cosmetic: it stores a display name and sends `/rename <name>` to Claude, whose OSC title sequence updates the tab. Persistence is already automatic through the session ID. Duplicate display names are auto-suffixed (`name`, `name-2`, `name-3`, …)
 5. **Work across terminals** — switch between terminals, leave Claude working in background ones
@@ -65,7 +65,7 @@ Add to `~/.claude/settings.json`:
 {
   "hooks": {
     "SessionStart": [
-      { "matcher": "", "hooks": [{ "type": "command", "command": "test -n \"$DTACH_SIGNAL_DIR\" && test -n \"$DTACH_SOCKET_INDEX\" && jq -r .session_id > \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid.tmp\" && mv \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid.tmp\" \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.sid\" || true", "timeout": 1000 }] }
+      { "matcher": "", "hooks": [{ "type": "command", "command": "if test -n \"$DTACH_SIGNAL_DIR\"; then if test -n \"$DTACH_SOCKET_INDEX\"; then sid_file=\"$DTACH_SOCKET_INDEX.sid\"; else sid_file=\"pid-$PPID.sid\"; fi; jq -r .session_id > \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" && mv \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" \"$DTACH_SIGNAL_DIR/$sid_file\"; fi; true", "timeout": 1000 }] }
     ],
     "Stop": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "test -n \"$DTACH_SIGNAL_DIR\" && test -n \"$DTACH_SOCKET_INDEX\" && touch \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.signal\" || true", "timeout": 1000 }] }
@@ -80,7 +80,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-The `SessionStart` hook captures the session UUID on every start, resume, and clear. It writes to a `.tmp` file and renames it so the watcher never reads a partial write; the extension consumes the `.sid` file without displaying it in the status bar.
+The `SessionStart` hook captures the session UUID on every start, resume, and clear. It writes to a `.tmp` file and renames it so the watcher never reads a partial write; the extension consumes the `.sid` file without displaying it in the status bar. Managed terminals use `<index>.sid`; plain terminals use `pid-<claudePid>.sid` based on the hook's parent process.
 
 Three notification signal types:
 - **Stop** → `.signal` file → "done" (yellow in status bar)
@@ -92,7 +92,11 @@ Three notification signal types:
 **State persistence:**
 - State saved to `~/.cc-persist/<workspaceId>/state.json` — survives reboots
 - Signal files in `$TMPDIR/dtach-persist/<workspaceId>/signals/` — ephemeral
-- `SessionStart` writes `<index>.sid`; the watcher maps the terminal index to its UUID and immediately saves v2 state
+- The extension injects `DTACH_SIGNAL_DIR` into all terminals through VS Code's environment variable collection
+- **Index lane:** cc-persist-created terminals also receive `DTACH_SOCKET_INDEX`; `SessionStart` writes `<index>.sid`, and the watcher maps the index directly to its UUID. This lane is unchanged and also supports notification signals
+- **PID lane:** without an index, `SessionStart` writes `pid-<claudePid>.sid`; the extension walks the process ancestry to match Claude to a VS Code terminal's shell PID, adopts that terminal, and saves its UUID
+- The PID resolver rejects any ancestry containing another Claude process between the reported process and the shell, so nested `claude -p` calls cannot overwrite the terminal's real session
+- PID-adopted terminals persist without a stored name. They do not receive completion, permission, or error notifications because those signals still require `DTACH_SOCKET_INDEX`
 - Session names are optional display metadata and a fallback for legacy v1 state
 - `names.json` and `workspace.json` written to signal base dir for cc-overlord
 

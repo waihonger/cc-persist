@@ -5,6 +5,9 @@ import * as os from "os";
 import { TerminalManager, isValidSessionName } from "../src/terminalManager";
 import { window } from "vscode";
 
+const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+const OTHER_SID = "a4e9761c-5ddc-48aa-a592-6c2bead472e9";
+
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-test-"));
 }
@@ -116,6 +119,36 @@ describe("TerminalManager", () => {
       const t = tm.createTerminal();
       tm.renameTerminal(t, "warroom");
       expect(tm.getSavedName(0)).toBe("warroom");
+    });
+  });
+
+  describe("PID-lane adoption", () => {
+    it("adoptWithSessionId assigns a fresh index and saves an unnamed terminal", () => {
+      tm.createTerminal();
+      const terminal = window.createTerminal({ name: "plain terminal" });
+
+      expect(tm.adoptWithSessionId(terminal, SID)).toBe(true);
+      expect(tm.getIndex(terminal)).toBe(1);
+      expect(tm.loadState().terminals).toEqual([{ index: 1, sessionId: SID }]);
+    });
+
+    it("adoptWithSessionId reuses a tracked terminal index and overwrites its session ID", () => {
+      const terminal = tm.createTerminal();
+      const index = tm.getIndex(terminal);
+
+      expect(tm.adoptWithSessionId(terminal, SID)).toBe(true);
+      expect(tm.adoptWithSessionId(terminal, OTHER_SID)).toBe(true);
+      expect(tm.getIndex(terminal)).toBe(index);
+      expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: OTHER_SID }]);
+    });
+
+    it("adoptWithSessionId rejects an invalid session ID without saving", () => {
+      const terminal = window.createTerminal({ name: "plain terminal" });
+      const saveState = vi.spyOn(tm, "saveState");
+
+      expect(tm.adoptWithSessionId(terminal, "not-a-session-id")).toBe(false);
+      expect(tm.isTracked(terminal)).toBe(false);
+      expect(saveState).not.toHaveBeenCalled();
     });
   });
 

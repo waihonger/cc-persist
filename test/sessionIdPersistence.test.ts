@@ -205,12 +205,19 @@ describe("session ID persistence", () => {
 });
 
 describe("SignalWatcher session IDs", () => {
+  async function flushPidLane(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
   function makeWatcherFixture() {
     const stateDir = makeTmpDir();
     const signalBaseDir = makeTmpDir();
     const signalDir = makeTmpDir();
     const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     const callback = vi.fn(() => true);
+    const pidCallback = vi.fn(async () => true);
     const show = vi.fn();
     const originalCreateStatusBarItem = window.createStatusBarItem;
     (window as any).createStatusBarItem = () => ({
@@ -222,10 +229,10 @@ describe("SignalWatcher session IDs", () => {
       hide: vi.fn(),
       dispose: vi.fn(),
     });
-    const watcher = new SignalWatcher(signalDir, tm, makeLog().channel, callback);
+    const watcher = new SignalWatcher(signalDir, tm, makeLog().channel, callback, 4, pidCallback);
     const context = { subscriptions: [] } as unknown as import("vscode").ExtensionContext;
     return {
-      signalDir, callback, show, watcher, context,
+      signalDir, callback, pidCallback, show, watcher, context,
       cleanup: () => {
         watcher.dispose();
         tm.disposeAll();
@@ -295,5 +302,77 @@ describe("SignalWatcher session IDs", () => {
 
     vi.useRealTimers();
     f.cleanup();
+  });
+
+  it("pid sid file invokes the resolver callback and is unlinked on success", async () => {
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, `${SID}\n`);
+
+    f.watcher.start(f.context);
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(f.pidCallback).toHaveBeenCalledWith(4321, SID);
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+  });
+
+  it("pid sid file is retained after callback failure, then discarded after the retry window", async () => {
+    vi.useFakeTimers();
+    const f = makeWatcherFixture();
+    f.pidCallback.mockResolvedValue(false);
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, `${SID}\n`);
+
+    f.watcher.start(f.context);
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+    expect(fs.existsSync(sidPath)).toBe(true);
+
+    const past = new Date(Date.now() - 61_000);
+    fs.utimesSync(sidPath, past, past);
+    vi.advanceTimersByTime(10_000);
+    await flushPidLane();
+
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+    vi.useRealTimers();
+  });
+
+  it("malformed pid sid filename never invokes the resolver callback", async () => {
+    const f = makeWatcherFixture();
+    fs.writeFileSync(path.join(f.signalDir, "pid-abc.sid"), `${SID}\n`);
+
+    f.watcher.start(f.context);
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(f.pidCallback).not.toHaveBeenCalled();
+    f.cleanup();
+  });
+
+  it("pid sid in-flight guard prevents a second scan from resolving the same file", async () => {
+    vi.useFakeTimers();
+    const f = makeWatcherFixture();
+    let finish: ((done: boolean) => void) | undefined;
+    f.pidCallback.mockImplementation(() => new Promise<boolean>((resolve) => {
+      finish = resolve;
+    }));
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, `${SID}\n`);
+
+    f.watcher.start(f.context);
+    f.watcher.markRestoreComplete();
+    expect(f.pidCallback).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(10_000);
+    expect(f.pidCallback).toHaveBeenCalledTimes(1);
+
+    finish?.(true);
+    await flushPidLane();
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+    vi.useRealTimers();
   });
 });
