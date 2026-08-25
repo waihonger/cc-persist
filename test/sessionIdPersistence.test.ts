@@ -308,7 +308,7 @@ describe("SignalWatcher session IDs", () => {
     expect(fs.existsSync(sidPath)).toBe(true);
 
     f.watcher.markRestoreComplete();
-    expect(f.callback).toHaveBeenCalledWith(7, SID);
+    expect(f.callback).toHaveBeenCalledWith(7, SID, undefined);
     expect(fs.existsSync(sidPath)).toBe(false);
     expect(f.show).not.toHaveBeenCalled();
 
@@ -324,7 +324,7 @@ describe("SignalWatcher session IDs", () => {
 
     f.watcher.start(f.context);
     f.watcher.markRestoreComplete();
-    expect(f.callback).toHaveBeenCalledWith(5, SID);
+    expect(f.callback).toHaveBeenCalledWith(5, SID, undefined);
     expect(fs.existsSync(sidPath)).toBe(true); // kept — next poll retries
 
     const past = new Date(Date.now() - 61_000);
@@ -351,7 +351,7 @@ describe("SignalWatcher session IDs", () => {
     fs.writeFileSync(sidPath, `${SID}\n`);
     vi.advanceTimersByTime(10_000); // next poll picks it up
 
-    expect(f.callback).toHaveBeenCalledWith(3, SID);
+    expect(f.callback).toHaveBeenCalledWith(3, SID, undefined);
     expect(fs.existsSync(sidPath)).toBe(false);
 
     vi.useRealTimers();
@@ -367,7 +367,7 @@ describe("SignalWatcher session IDs", () => {
     f.watcher.markRestoreComplete();
     await flushPidLane();
 
-    expect(f.pidCallback).toHaveBeenCalledWith(4321, SID);
+    expect(f.pidCallback).toHaveBeenCalledWith(4321, SID, undefined);
     expect(fs.existsSync(sidPath)).toBe(false);
     f.cleanup();
   });

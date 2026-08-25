@@ -292,9 +292,7 @@ export class SignalWatcher {
     try {
       const payload = parseSidPayload(fs.readFileSync(filePath, "utf8"));
       if (isValidIndex(index) && payload) {
-        done = payload.cwd === undefined
-          ? this.onSessionId(index, payload.sessionId)
-          : this.onSessionId(index, payload.sessionId, payload.cwd);
+        done = this.onSessionId(index, payload.sessionId, payload.cwd);
         if (done) this.log.appendLine(`Session ID received: terminal ${index}`);
       }
     } catch {
@@ -354,9 +352,7 @@ export class SignalWatcher {
       const payload = parseSidPayload(raw);
       if (Number.isInteger(claudePid) && claudePid > 0 && payload) {
         try {
-          done = payload.cwd === undefined
-            ? await this.onPidSessionId(claudePid, payload.sessionId)
-            : await this.onPidSessionId(claudePid, payload.sessionId, payload.cwd);
+          done = await this.onPidSessionId(claudePid, payload.sessionId, payload.cwd);
         } catch {
           done = false;
         }
