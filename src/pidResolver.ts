@@ -31,18 +31,20 @@ export function findOwningShellPid(
   procs: Map<number, ProcEntry>,
   shellPids: Set<number>,
 ): number | null {
-  if (claudePid <= 1) return null;
-  let current = procs.get(claudePid);
-  if (!current) return null;
+  const start = procs.get(claudePid);
+  if (claudePid <= 1 || !start || !isClaudeCommand(start.command)) return null;
+  if (shellPids.has(claudePid)) return claudePid;
 
   const visited = new Set<number>([claudePid]);
-  for (let depth = 1; depth <= 32; depth++) {
+  let current = start;
+  for (let depth = 0; depth < 32; depth++) {
     const parentPid = current.ppid;
     if (parentPid <= 1 || visited.has(parentPid)) return null;
-    if (shellPids.has(parentPid)) return parentPid;
 
     const parent = procs.get(parentPid);
-    if (!parent || isClaudeCommand(parent.command)) return null;
+    if (parent && isClaudeCommand(parent.command)) return null;
+    if (shellPids.has(parentPid)) return parentPid;
+    if (!parent) return null;
     visited.add(parentPid);
     current = parent;
   }
@@ -55,7 +57,7 @@ export function snapshotProcesses(): Promise<Map<number, ProcEntry>> {
     execFile(
       "/bin/ps",
       ["-axo", "pid,ppid,command"],
-      { encoding: "utf8" },
+      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
       (error, stdout) => resolve(error ? new Map() : parsePsOutput(stdout)),
     );
   });

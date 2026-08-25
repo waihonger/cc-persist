@@ -81,4 +81,31 @@ not a process row
     expect(findOwningShellPid(200, orphaned, new Set([100]))).toBeNull();
     expect(findOwningShellPid(200, cyclic, new Set([100]))).toBeNull();
   });
+
+  it("rejects a start PID whose command is not Claude", () => {
+    const procs = processMap([
+      { pid: 100, ppid: 1, command: "/bin/zsh -l" },
+      { pid: 200, ppid: 100, command: "/bin/bash ./worker" },
+    ]);
+
+    expect(findOwningShellPid(200, procs, new Set([100]))).toBeNull();
+  });
+
+  it("resolves an exec-Claude terminal to the Claude PID itself", () => {
+    const procs = processMap([
+      { pid: 200, ppid: 1, command: "claude --resume x" },
+    ]);
+
+    expect(findOwningShellPid(200, procs, new Set([200]))).toBe(200);
+  });
+
+  it("rejects an inner Claude when its shell PID is itself Claude", () => {
+    const procs = processMap([
+      { pid: 200, ppid: 1, command: "claude --resume outer" },
+      { pid: 250, ppid: 200, command: "/bin/bash" },
+      { pid: 300, ppid: 250, command: "claude -p inner" },
+    ]);
+
+    expect(findOwningShellPid(300, procs, new Set([200]))).toBeNull();
+  });
 });

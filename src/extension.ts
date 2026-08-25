@@ -6,7 +6,7 @@ import { TerminalManager, isValidSessionName, CLEANUP_DELAY_MS, DEFAULT_RESUME_F
 
 let terminalManager: TerminalManager | undefined;
 
-async function adoptPidSession(claudePid: number, sid: string): Promise<boolean> {
+async function adoptPidSession(claudePid: number, sid: string, cwd?: string): Promise<boolean> {
   if (!terminalManager) return false;
   const terminals = vscode.window.terminals;
   const pidPairs = await Promise.all(terminals.map(async (terminal) => [terminal, await terminal.processId] as const));
@@ -20,7 +20,8 @@ async function adoptPidSession(claudePid: number, sid: string): Promise<boolean>
   if (shellPid === null) return false;
   const owner = pidPairs.find(([, pid]) => pid === shellPid)?.[0];
   if (!owner) return false;
-  return terminalManager.adoptWithSessionId(owner, sid);
+  if (!vscode.window.terminals.includes(owner) || owner.exitStatus !== undefined) return false;
+  return terminalManager.adoptWithSessionId(owner, sid, cwd);
 }
 
 export async function activate(
@@ -69,7 +70,7 @@ export async function activate(
     sigDir,
     terminalManager,
     log,
-    (index, sid) => terminalManager!.setSessionId(index, sid),
+    (index, sid, cwd) => terminalManager!.setSessionId(index, sid, cwd),
     staleSignalHours,
     adoptPidSession,
   );

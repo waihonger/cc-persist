@@ -28,6 +28,32 @@ export function isValidSessionId(sessionId: unknown): boolean {
   return typeof sessionId === "string" && SESSION_ID_RE.test(sessionId);
 }
 
+function isValidSessionCwd(cwd: unknown): cwd is string {
+  return typeof cwd === "string"
+    && cwd.length <= 1024
+    && !/[\0\r\n]/.test(cwd)
+    && path.isAbsolute(cwd);
+}
+
+/** Parse the JSON SessionStart payload, while retaining bare UUID compatibility. */
+export function parseSidPayload(raw: string): { sessionId: string; cwd?: string } | null {
+  const trimmed = raw.trim();
+  if (isValidSessionId(trimmed)) return { sessionId: trimmed };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const payload = parsed as Record<string, unknown>;
+  const sessionId = payload.sessionId;
+  if (!isValidSessionId(sessionId)) return null;
+  const cwd = isValidSessionCwd(payload.cwd) ? payload.cwd : undefined;
+  return { sessionId: sessionId as string, ...(cwd ? { cwd } : {}) };
+}
+
 export function isValidIndex(index: unknown): boolean {
   return typeof index === "number" && Number.isInteger(index) && index >= 0 && index < Number.MAX_SAFE_INTEGER;
 }
@@ -41,9 +67,15 @@ function normalizeEntry(entry: unknown, version: number): SessionInfo | null {
   const sessionId = version === 2 && typeof e.sessionId === "string" && isValidSessionId(e.sessionId)
     ? e.sessionId
     : undefined;
+  const cwd = isValidSessionCwd(e.cwd) ? e.cwd : undefined;
   if (!sessionId && !name) return null;
 
-  return { index: e.index as number, ...(sessionId ? { sessionId } : {}), ...(name ? { name } : {}) };
+  return {
+    index: e.index as number,
+    ...(sessionId ? { sessionId } : {}),
+    ...(name ? { name } : {}),
+    ...(cwd ? { cwd } : {}),
+  };
 }
 
 export class TerminalManager {
@@ -54,6 +86,7 @@ export class TerminalManager {
   private readonly terminalToIndex = new Map<vscode.Terminal, number>();
   private readonly indexToTerminal = new Map<number, vscode.Terminal>();
   private readonly indexToSessionId = new Map<number, string>();
+  private readonly indexToCwd = new Map<number, string>();
   private readonly sessionNames = new Map<vscode.Terminal, string>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly pendingCleanups = new Map<vscode.Terminal, NodeJS.Timeout>();
@@ -124,9 +157,15 @@ export class TerminalManager {
       const name = this.sessionNames.get(terminal) ?? terminal.name;
       names[index] = name;
       const sessionId = this.indexToSessionId.get(index);
+      const cwd = this.indexToCwd.get(index);
       const sessionName = this.sessionNames.get(terminal);
       if (!sessionId && !sessionName) continue;
-      terminals.push({ index, ...(sessionId ? { sessionId } : {}), ...(sessionName ? { name: sessionName } : {}) });
+      terminals.push({
+        index,
+        ...(sessionId ? { sessionId } : {}),
+        ...(sessionName ? { name: sessionName } : {}),
+        ...(cwd ? { cwd } : {}),
+      });
     }
     terminals.sort((a, b) => a.index - b.index);
 
@@ -211,7 +250,7 @@ export class TerminalManager {
           DTACH_SIGNAL_DIR: this.sigDir,
           DTACH_SOCKET_INDEX: info.index.toString(),
         },
-        cwd: this.startDir,
+        cwd: info.cwd && fs.existsSync(info.cwd) ? info.cwd : this.startDir,
         isTransient: true,
       });
 
@@ -219,6 +258,7 @@ export class TerminalManager {
       this.indexToTerminal.set(info.index, terminal);
 
       if (info.sessionId) this.indexToSessionId.set(info.index, info.sessionId);
+      if (info.cwd) this.indexToCwd.set(info.index, info.cwd);
       if (info.name) this.sessionNames.set(terminal, info.name);
       const handle = info.sessionId ?? info.name!;
       this.sendCommand(terminal, `export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${info.index}' && claude ${this.resumeFlags} --resume '${handle}'`);
@@ -249,6 +289,7 @@ export class TerminalManager {
       this.terminalToIndex.delete(terminal);
       this.indexToTerminal.delete(index);
       this.indexToSessionId.delete(index);
+      this.indexToCwd.delete(index);
       this.sessionNames.delete(terminal);
       this.clearPendingCommand(terminal);
       this.saveState();
@@ -297,7 +338,7 @@ export class TerminalManager {
 
   /** Returns true only when the session ID was accepted AND persisted to disk —
    *  the caller keeps the source .sid file for retry on false. */
-  setSessionId(index: number, sid: string): boolean {
+  setSessionId(index: number, sid: string, cwd?: string): boolean {
     if (!isValidIndex(index) || !isValidSessionId(sid)) {
       this.log.appendLine(`Ignoring invalid session ID for terminal ${index}: ${sid}`);
       return false;
@@ -310,18 +351,20 @@ export class TerminalManager {
       return false;
     }
     this.indexToSessionId.set(index, sid);
+    this.setCwd(index, cwd);
     return this.saveState();
   }
 
   /** Adopt a terminal cc-persist didn't create and persist its session ID.
    *  Returns true only when accepted AND persisted. */
-  adoptWithSessionId(terminal: vscode.Terminal, sid: string): boolean {
+  adoptWithSessionId(terminal: vscode.Terminal, sid: string, cwd?: string): boolean {
     if (!isValidSessionId(sid)) {
       this.log.appendLine(`Ignoring invalid session ID for terminal ${terminal.name}: ${sid}`);
       return false;
     }
     const index = this.terminalToIndex.get(terminal) ?? this.adoptTerminal(terminal);
     this.indexToSessionId.set(index, sid);
+    this.setCwd(index, cwd);
     return this.saveState();
   }
 
@@ -358,6 +401,14 @@ export class TerminalManager {
     this.indexToTerminal.set(index, terminal);
     this.log.appendLine(`Adopted terminal ${index}: ${terminal.name}`);
     return index;
+  }
+
+  private setCwd(index: number, cwd: string | undefined): void {
+    if (isValidSessionCwd(cwd)) {
+      this.indexToCwd.set(index, cwd);
+    } else {
+      this.indexToCwd.delete(index);
+    }
   }
 
   getSessionName(terminal: vscode.Terminal): string | undefined {
@@ -432,6 +483,7 @@ export class TerminalManager {
     this.terminalToIndex.clear();
     this.indexToTerminal.clear();
     this.indexToSessionId.clear();
+    this.indexToCwd.clear();
     this.sessionNames.clear();
   }
 }

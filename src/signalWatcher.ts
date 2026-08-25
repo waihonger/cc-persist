@@ -1,12 +1,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { isValidIndex, isValidSessionId } from "./terminalManager";
+import { isValidIndex, parseSidPayload } from "./terminalManager";
 import type { TerminalManager } from "./terminalManager";
 
 const DEFAULT_STALE_THRESHOLD_HOURS = 4;
 const POLL_INTERVAL_MS = 10 * 1000; // 10 seconds
 const PID_SID_FILE_RE = /^pid-(\d+)\.sid$/;
+/** Legacy ingestion lane for index-based SessionStart hook files. */
 const SID_FILE_RE = /^(\d+)\.sid$/;
 /** Grace period for a .sid file whose content is still invalid (writer mid-write). */
 const SID_RETRY_WINDOW_MS = 60 * 1000;
@@ -38,8 +39,8 @@ export class SignalWatcher {
   private readonly log: vscode.OutputChannel;
   private readonly terminalManager: TerminalManager;
   /** Returns true when the sid was persisted — false keeps the .sid file for retry. */
-  private readonly onSessionId: (index: number, sid: string) => boolean;
-  private readonly onPidSessionId: (claudePid: number, sid: string) => Promise<boolean>;
+  private readonly onSessionId: (index: number, sid: string, cwd?: string) => boolean;
+  private readonly onPidSessionId: (claudePid: number, sid: string, cwd?: string) => Promise<boolean>;
   private readonly staleThresholdMs: number;
   private readonly signals = new Map<string, Signal>(); // key: "index:type"
   private readonly pidSessionIdsInFlight = new Set<string>();
@@ -52,9 +53,9 @@ export class SignalWatcher {
     signalDir: string,
     terminalManager: TerminalManager,
     log: vscode.OutputChannel,
-    onSessionId: (index: number, sid: string) => boolean = () => false,
+    onSessionId: (index: number, sid: string, cwd?: string) => boolean = () => false,
     staleSignalHours = DEFAULT_STALE_THRESHOLD_HOURS,
-    onPidSessionId: (claudePid: number, sid: string) => Promise<boolean> = async () => false,
+    onPidSessionId: (claudePid: number, sid: string, cwd?: string) => Promise<boolean> = async () => false,
   ) {
     this.signalDir = signalDir;
     this.terminalManager = terminalManager;
@@ -289,9 +290,11 @@ export class SignalWatcher {
     const filePath = path.join(this.signalDir, filename);
     let done = false;
     try {
-      const sid = fs.readFileSync(filePath, "utf8").trim();
-      if (isValidIndex(index) && isValidSessionId(sid)) {
-        done = this.onSessionId(index, sid);
+      const payload = parseSidPayload(fs.readFileSync(filePath, "utf8"));
+      if (isValidIndex(index) && payload) {
+        done = payload.cwd === undefined
+          ? this.onSessionId(index, payload.sessionId)
+          : this.onSessionId(index, payload.sessionId, payload.cwd);
         if (done) this.log.appendLine(`Session ID received: terminal ${index}`);
       }
     } catch {
@@ -324,17 +327,36 @@ export class SignalWatcher {
     this.pidSessionIdsInFlight.add(filename);
     const filePath = path.join(this.signalDir, filename);
     try {
-      let sid: string;
+      let mtimeMs: number;
       try {
-        sid = fs.readFileSync(filePath, "utf8").trim();
+        mtimeMs = fs.statSync(filePath).mtimeMs;
+      } catch {
+        return; // file may have been deleted
+      }
+      if (Date.now() - mtimeMs > SID_RETRY_WINDOW_MS) {
+        this.log.appendLine(`Stale session ID file discarded: ${filename}`);
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          // already gone
+        }
+        return;
+      }
+
+      let raw: string;
+      try {
+        raw = fs.readFileSync(filePath, "utf8");
       } catch {
         return; // file may have been deleted
       }
 
       let done = false;
-      if (Number.isInteger(claudePid) && claudePid > 0 && isValidSessionId(sid)) {
+      const payload = parseSidPayload(raw);
+      if (Number.isInteger(claudePid) && claudePid > 0 && payload) {
         try {
-          done = await this.onPidSessionId(claudePid, sid);
+          done = payload.cwd === undefined
+            ? await this.onPidSessionId(claudePid, payload.sessionId)
+            : await this.onPidSessionId(claudePid, payload.sessionId, payload.cwd);
         } catch {
           done = false;
         }
@@ -350,6 +372,17 @@ export class SignalWatcher {
         }
         if (ageMs < SID_RETRY_WINDOW_MS) return;
         this.log.appendLine(`Unprocessed session ID file discarded: ${filename}`);
+      }
+
+      let currentRaw: string;
+      try {
+        currentRaw = fs.readFileSync(filePath, "utf8");
+      } catch {
+        return; // already gone
+      }
+      if (currentRaw !== raw) {
+        this.log.appendLine(`Session ID file superseded while resolving: ${filename}`);
+        return;
       }
       try {
         fs.unlinkSync(filePath);

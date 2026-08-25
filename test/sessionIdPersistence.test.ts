@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { SignalWatcher } from "../src/signalWatcher";
-import { TerminalManager } from "../src/terminalManager";
+import { parseSidPayload, TerminalManager } from "../src/terminalManager";
 import { _attachShellIntegration, window } from "vscode";
 
 const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
@@ -202,6 +202,60 @@ describe("session ID persistence", () => {
 
     (window as any).createTerminal = original;
   });
+
+  it("parseSidPayload accepts legacy UUIDs and validated JSON payloads", () => {
+    expect(parseSidPayload(`${SID}\n`)).toEqual({ sessionId: SID });
+    expect(parseSidPayload(JSON.stringify({ sessionId: SID, cwd: "/tmp/project" }))).toEqual({
+      sessionId: SID,
+      cwd: "/tmp/project",
+    });
+    expect(parseSidPayload(JSON.stringify({ sessionId: SID, cwd: "relative/project" }))).toEqual({
+      sessionId: SID,
+    });
+    expect(parseSidPayload(JSON.stringify({ sessionId: "bad", cwd: "/tmp/project" }))).toBeNull();
+    expect(parseSidPayload("not JSON or a UUID")).toBeNull();
+  });
+
+  it("state round-trip preserves the captured working directory", () => {
+    tm.createTerminal();
+    tm.setSessionId(0, SID, "/tmp/project");
+
+    expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: SID, cwd: "/tmp/project" }]);
+  });
+
+  it("a later capture without cwd clears the previously captured directory", () => {
+    tm.createTerminal();
+    tm.setSessionId(0, SID, "/tmp/project");
+    tm.setSessionId(0, OTHER_SID);
+
+    expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: OTHER_SID }]);
+  });
+
+  it("restore creates a terminal in its saved working directory when it exists", () => {
+    const savedCwd = makeTmpDir();
+    writeState(stateDir, {
+      version: 2,
+      terminals: [{ index: 0, sessionId: SID, cwd: savedCwd }],
+    });
+
+    const [terminal] = tm.restoreTerminals();
+
+    expect((terminal as any).creationOptions.cwd).toBe(savedCwd);
+    fs.rmSync(savedCwd, { recursive: true, force: true });
+  });
+
+  it("restore falls back to the start directory when the saved working directory is gone", () => {
+    const removedCwd = makeTmpDir();
+    fs.rmSync(removedCwd, { recursive: true, force: true });
+    writeState(stateDir, {
+      version: 2,
+      terminals: [{ index: 0, sessionId: SID, cwd: removedCwd }],
+    });
+
+    const [terminal] = tm.restoreTerminals();
+
+    expect((terminal as any).creationOptions.cwd).toBe("/tmp");
+  });
 });
 
 describe("SignalWatcher session IDs", () => {
@@ -374,5 +428,75 @@ describe("SignalWatcher session IDs", () => {
     expect(fs.existsSync(sidPath)).toBe(false);
     f.cleanup();
     vi.useRealTimers();
+  });
+
+  it("stale pid sid file is removed without invoking the resolver callback", async () => {
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, `${SID}\n`);
+    const stale = new Date(Date.now() - 120_000);
+    fs.utimesSync(sidPath, stale, stale);
+
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(f.pidCallback).not.toHaveBeenCalled();
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+  });
+
+  it("pid sid JSON payload passes its cwd to the resolver callback", async () => {
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID, cwd: "/tmp/project" }));
+
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(f.pidCallback).toHaveBeenCalledWith(4321, SID, "/tmp/project");
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+  });
+
+  it("legacy index sid JSON payload passes its cwd to the persistence callback", () => {
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "7.sid");
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID, cwd: "/tmp/project" }));
+
+    f.watcher.markRestoreComplete();
+
+    expect(f.callback).toHaveBeenCalledWith(7, SID, "/tmp/project");
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+  });
+
+  it("pid sid file rewritten during resolution is left for the next scan", async () => {
+    const f = makeWatcherFixture();
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    let finish: ((done: boolean) => void) | undefined;
+    f.pidCallback
+      .mockImplementationOnce(() => {
+        fs.writeFileSync(sidPath, JSON.stringify({ sessionId: OTHER_SID, cwd: "/tmp/second" }));
+        return new Promise<boolean>((resolve) => { finish = resolve; });
+      })
+      .mockResolvedValueOnce(true);
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID, cwd: "/tmp/first" }));
+
+    f.watcher.markRestoreComplete();
+    finish?.(true);
+    await flushPidLane();
+
+    expect(fs.existsSync(sidPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(sidPath, "utf8"))).toEqual({
+      sessionId: OTHER_SID,
+      cwd: "/tmp/second",
+    });
+
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(f.pidCallback).toHaveBeenNthCalledWith(2, 4321, OTHER_SID, "/tmp/second");
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
   });
 });

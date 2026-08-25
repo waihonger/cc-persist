@@ -36,7 +36,7 @@ VS Code extension that persists Claude Code terminal sessions across VS Code res
 - [Claude Code](https://claude.ai/code) 2.1.139+ — owns the tab title via OSC escape sequences
 - VS Code user setting: `"terminal.integrated.tabs.title": "${sequence}"` — without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name
 - [Claude Code](https://claude.ai/code) hooks configured (see below)
-- `jq` (`brew install jq`) — the `SessionStart` hook uses it to extract the session UUID; without it, session-ID persistence silently degrades to name-only
+- `jq` (`brew install jq`) — the `SessionStart` hook uses it to build the session UUID + working-directory payload; without it, session-ID persistence silently degrades to name-only
 - Optional: [cc-overlord](https://github.com/waihonger/cc-overlord) for cross-workspace notifications + global hotkey
 
 ## Install
@@ -65,7 +65,7 @@ Add to `~/.claude/settings.json`:
 {
   "hooks": {
     "SessionStart": [
-      { "matcher": "", "hooks": [{ "type": "command", "command": "if test -n \"$DTACH_SIGNAL_DIR\"; then if test -n \"$DTACH_SOCKET_INDEX\"; then sid_file=\"$DTACH_SOCKET_INDEX.sid\"; else sid_file=\"pid-$PPID.sid\"; fi; jq -r .session_id > \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" && mv \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" \"$DTACH_SIGNAL_DIR/$sid_file\"; fi; true", "timeout": 1000 }] }
+      { "matcher": "", "hooks": [{ "type": "command", "command": "if test -n \"$DTACH_SIGNAL_DIR\"; then sid_file=\"pid-$PPID.sid\"; jq -c '{sessionId:.session_id,cwd:.cwd}' > \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" && mv \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" \"$DTACH_SIGNAL_DIR/$sid_file\"; fi; true", "timeout": 1000 }] }
     ],
     "Stop": [
       { "matcher": "", "hooks": [{ "type": "command", "command": "test -n \"$DTACH_SIGNAL_DIR\" && test -n \"$DTACH_SOCKET_INDEX\" && touch \"$DTACH_SIGNAL_DIR/$DTACH_SOCKET_INDEX.signal\" || true", "timeout": 1000 }] }
@@ -80,7 +80,9 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-The `SessionStart` hook captures the session UUID on every start, resume, and clear. It writes to a `.tmp` file and renames it so the watcher never reads a partial write; the extension consumes the `.sid` file without displaying it in the status bar. Managed terminals use `<index>.sid`; plain terminals use `pid-<claudePid>.sid` based on the hook's parent process.
+The `SessionStart` hook captures the session UUID and absolute working directory on every start, resume, and clear. It always writes `pid-<claudePid>.sid`, using the hook's parent PID, with a JSON payload shaped like `{"sessionId":"<uuid>","cwd":"/absolute/path"}`. The `.tmp` + `mv` sequence makes publication atomic, and the extension consumes the `.sid` file without displaying it in the status bar. Bare UUID payloads and `<index>.sid` filenames remain readable only for legacy files created during migration.
+
+`DTACH_SOCKET_INDEX` is still injected into cc-persist-created terminals, but only the Stop, PermissionRequest, and StopFailure hooks use it now. Session capture always uses the PID filename, including in managed terminals.
 
 Three notification signal types:
 - **Stop** → `.signal` file → "done" (yellow in status bar)
@@ -93,10 +95,13 @@ Three notification signal types:
 - State saved to `~/.cc-persist/<workspaceId>/state.json` — survives reboots
 - Signal files in `$TMPDIR/dtach-persist/<workspaceId>/signals/` — ephemeral
 - The extension injects `DTACH_SIGNAL_DIR` into all terminals through VS Code's environment variable collection
-- **Index lane:** cc-persist-created terminals also receive `DTACH_SOCKET_INDEX`; `SessionStart` writes `<index>.sid`, and the watcher maps the index directly to its UUID. This lane is unchanged and also supports notification signals
-- **PID lane:** without an index, `SessionStart` writes `pid-<claudePid>.sid`; the extension walks the process ancestry to match Claude to a VS Code terminal's shell PID, adopts that terminal, and saves its UUID
-- The PID resolver rejects any ancestry containing another Claude process between the reported process and the shell, so nested `claude -p` calls cannot overwrite the terminal's real session
+- **PID lane:** every new `SessionStart` capture writes `pid-<claudePid>.sid`; the extension verifies that PID is Claude, walks its process ancestry to a VS Code terminal's shell PID, adopts that terminal, and saves its UUID and working directory
+- **Legacy index lane:** the watcher still ingests `<index>.sid` files created by older hook configurations during migration, but the current hook never writes them
+- The PID resolver accepts a terminal whose shell PID is the Claude PID itself, covering terminal profiles that run Claude directly or use `exec claude`
+- The PID resolver checks for another Claude process before accepting any ancestor as a terminal shell, so nested `claude -p` calls cannot overwrite the terminal's real session, including when the outer Claude process is itself the shell PID
+- PID files bind to a process only for 60 seconds after their mtime. Older files are deleted without resolution to prevent a reused PID from attaching the wrong session
 - PID-adopted terminals persist without a stored name. They do not receive completion, permission, or error notifications because those signals still require `DTACH_SOCKET_INDEX`
+- Restore starts each session in its captured working directory when that directory still exists, otherwise it falls back to the workspace start directory
 - Session names are optional display metadata and a fallback for legacy v1 state
 - `names.json` and `workspace.json` written to signal base dir for cc-overlord
 
@@ -107,7 +112,7 @@ Terminal close events fire before `deactivate()` during VS Code shutdown. The ex
 1. Load state from disk
 2. Close rogue terminals that VS Code auto-creates (unless `cc-persist.closeRogueTerminals` is disabled)
 3. Set up watcher for new rogue terminals
-4. After 150ms (or when rogue appears) — create terminals with env vars, resume by UUID (or by name for legacy entries)
+4. After 150ms (or when rogue appears) — create terminals in their saved working directories, falling back to the workspace start directory, then resume by UUID (or by name for legacy entries)
 
 **Signal flow:**
 1. Claude Code hooks write signal files using `DTACH_SIGNAL_DIR` + `DTACH_SOCKET_INDEX` env vars

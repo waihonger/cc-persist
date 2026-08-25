@@ -23,10 +23,10 @@ To install locally: `code --install-extension cc-persist-*.vsix`
 
 **Session persistence flow:**
 1. Activation injects `DTACH_SIGNAL_DIR` into every terminal through `environmentVariableCollection`.
-2. **Index lane:** `cc-persist.newTerminal` assigns a monotonic index and also injects `DTACH_SOCKET_INDEX`. Claude's `SessionStart` hook writes `<index>.sid`; `SignalWatcher` calls `setSessionId()` and immediately saves v2 state. This existing lane remains the source of completion, permission, and error notifications. **No `name` is passed to `vscode.window.createTerminal`** — Claude Code 2.1.139+ owns the tab title via OSC escape sequences.
-3. **PID lane:** in any terminal without `DTACH_SOCKET_INDEX`, the hook writes `pid-<claudePid>.sid`. `pidResolver.ts` walks the process ancestry to a VS Code terminal's `processId`; `adoptWithSessionId()` tracks that terminal and saves its UUID without a name. A strict intermediate-Claude guard rejects nested `claude -p` descendants so they cannot replace the outer session. Adopted terminals get persistence but no signal notifications because signal hooks still require an index.
+2. **PID lane:** the `SessionStart` hook always atomically publishes `pid-<claudePid>.sid` through a `.tmp` + `mv`, with JSON `{"sessionId":"<uuid>","cwd":"/absolute/path"}`. `pidResolver.ts` first verifies that the reported process is Claude, then walks its ancestry to a VS Code terminal's `processId`; `adoptWithSessionId()` tracks that terminal and saves its UUID + cwd without a name. A terminal profile that runs Claude directly or uses `exec claude` resolves because the Claude PID may itself be the shell PID. A strict Claude-ancestor guard runs before the shell match so nested `claude -p` descendants cannot replace the outer session, even when the outer Claude is the terminal shell. PID files older than 60 seconds are deleted before resolution to defend against PID reuse.
+3. **Legacy index lane:** `SignalWatcher` still ingests `<index>.sid` files left by older hook configurations, including bare UUID payloads, during migration. The current hook never writes this filename. `cc-persist.newTerminal` continues to inject `DTACH_SOCKET_INDEX` only because completion, permission, and error signal hooks require it. **No `name` is passed to `vscode.window.createTerminal`** — Claude Code 2.1.139+ owns the tab title via OSC escape sequences.
 4. Renaming with `cmd+shift+R` is optional and cosmetic. `renameTerminal()` stores a display name and sends `/rename`; saves happen on session-ID capture, rename, terminal close, and shutdown.
-5. On VS Code reopen → `restoreTerminals()` reads v2 state (or migrates v1 name-only entries), creates terminals with no `name` option, and runs `claude <resumeFlags> --resume '<sessionId>'`. Legacy entries fall back to the saved name. Commands prefer terminal shell integration and fall back to `sendText` after 3 seconds.
+5. On VS Code reopen → `restoreTerminals()` reads v2 state (or migrates v1 name-only entries), creates terminals with no `name` option in the saved cwd when it still exists (otherwise the workspace start directory), and runs `claude <resumeFlags> --resume '<sessionId>'`. Legacy entries fall back to the saved name. Commands prefer terminal shell integration and fall back to `sendText` after 3 seconds.
 
 **Required VS Code user setting** (for Claude's OSC titles to render in the tab):
 ```json
@@ -35,7 +35,7 @@ To install locally: `code --install-extension cc-persist-*.vsix`
 Without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name.
 
 **Signal notification flow:**
-1. Shell hooks write signal files (e.g., `0.signal`, `1.permission`, `2.error`) to `$TMPDIR/dtach-persist/<workspaceId>/signals/`; `SessionStart` writes `<index>.sid` or `pid-<claudePid>.sid`
+1. Shell hooks write signal files (e.g., `0.signal`, `1.permission`, `2.error`) to `$TMPDIR/dtach-persist/<workspaceId>/signals/`; `SessionStart` always writes `pid-<claudePid>.sid`, while `<index>.sid` ingestion is legacy-only
 2. `SignalWatcher` detects via `fs.watch` + 10s poll fallback. Both `.sid` lanes update persistence and never enter the status-bar signal map
 3. Status bar shows count with urgency (permission/error = alert icon, complete = bell)
 4. Click cycles through signals or shows quick pick; switching to terminal auto-clears its signal
@@ -44,7 +44,7 @@ Without this, VS Code's default `${process}` template wins and tabs show the run
 **Key modules:**
 - `extension.ts` — Activation wiring: creates TerminalManager, SignalWatcher, registers commands and timers
 - `pidResolver.ts` — Process-table parsing and ancestry matching, including the nested-Claude guard
-- `terminalManager.ts` — Terminal lifecycle: create, track, save/load state, restore sessions. Tracks UUIDs by terminal index and validates legacy session names and configurable resume flags
+- `terminalManager.ts` — Terminal lifecycle: create, track, save/load state, restore sessions. Tracks UUIDs and validated absolute working directories by terminal index, and validates legacy session names and configurable resume flags
 - `signalWatcher.ts` — File-based signal system: ingests `.sid` files and watches `.signal`/`.permission`/`.error` files, manages status bar, handles configurable stale signal pruning
 - `config.ts` — Path resolution: workspace ID (folder name + hash), state dir (`~/.cc-persist/`), signal dir (`$TMPDIR/dtach-persist/`)
 - `types.ts` — `SessionInfo` and `SessionState` interfaces
@@ -60,6 +60,7 @@ Stress tests (`*.stress.test.ts`) cover: duplicate indices, invalid state schema
 - **Session UUID is the persistence handle** — the `SessionStart` hook captures it automatically. Session names are display-only metadata and a legacy v1 resume fallback.
 - **Claude Code owns the tab title** — cc-persist does not pass `name` to `vscode.window.createTerminal` in either the new-terminal or restore paths. Claude Code 2.1.139+ emits OSC title sequences. Requires user's `terminal.integrated.tabs.title` to include `${sequence}` (see Architecture).
 - **Env var names kept as `DTACH_SIGNAL_DIR`/`DTACH_SOCKET_INDEX`** — legacy names preserved so existing shell hooks and cc-overlord don't need updates
+- **`DTACH_SOCKET_INDEX` is signal-only** — it remains injected for `.signal`, `.permission`, and `.error` hooks; current session capture always uses the PID lane
 - **`isTransient: true`** on created terminals — VS Code won't restore them natively (the extension handles restore)
 - **Resume inputs validated** — UUID and legacy-name validation protect the handle; configurable resume flags use a strict whitelist before entering the shell command
 - **`disposing` flag** — when VS Code shuts down, terminal close events preserve state instead of removing entries (so sessions survive restart)
