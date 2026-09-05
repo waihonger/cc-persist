@@ -56,62 +56,33 @@ describe("session ID persistence", () => {
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });
 
-  it("setSessionId stores valid UUID and persists v2 state", () => {
-    tm.createTerminal();
-    tm.setSessionId(0, SID);
-
-    expect(tm.loadState()).toEqual({
-      version: 2,
-      terminals: [{ index: 0, sessionId: SID }],
-    });
-  });
-
-  it("setSessionId rejects malformed session ids", () => {
-    const { lines } = makeLog();
-    tm.disposeAll();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", {
-      appendLine: (line: string) => lines.push(line),
-      dispose: () => {},
-    } as unknown as ReturnType<typeof window.createOutputChannel>);
-    tm.createTerminal();
-    tm.setSessionId(0, "not-a-uuid; rm -rf /");
-    tm.saveState();
-
-    expect(tm.loadState().terminals).toEqual([]);
-    expect(lines.some((line) => line.includes("Ignoring invalid session ID"))).toBe(true);
-  });
-
-  it("setSessionId ignores untracked indexes and does not overwrite state", () => {
-    writeState(stateDir, {
-      version: 2,
-      terminals: [{ index: 0, sessionId: OTHER_SID }],
-    });
-    const before = fs.readFileSync(path.join(stateDir, "state.json"), "utf8");
-
-    tm.setSessionId(3, SID); // no terminal tracked at index 3 — stale .sid scenario
-
-    expect(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).toBe(before);
-    expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: OTHER_SID }]);
-  });
-
   it("saveState persists unnamed terminals that have a sessionId", () => {
-    tm.createTerminal();
-    tm.setSessionId(0, SID);
+    const terminal = tm.createTerminal();
+    tm.adoptWithSessionId(terminal, SID);
     tm.saveState();
 
     expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: SID }]);
   });
 
-  it("loadState migrates v1 name-only entries", () => {
+  it("v1 state loads as empty", () => {
+    tm.disposeAll();
+    const log = makeLog();
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", log.channel, undefined, "/bin/zsh");
     writeState(stateDir, { version: 1, terminals: [{ name: "legacy", index: 4 }] });
 
     expect(tm.loadState()).toEqual({
       version: 2,
-      terminals: [{ index: 4, name: "legacy" }],
+      terminals: [],
     });
+    expect(log.lines).toContain(
+      "1 legacy name-only entries ignored (run scripts/migrate-name-only.py before upgrading)",
+    );
   });
 
-  it("loadState accepts v2 entries and rejects entries with neither sid nor name", () => {
+  it("loadState drops v2 entries without a valid sessionId", () => {
+    tm.disposeAll();
+    const log = makeLog();
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", log.channel, undefined, "/bin/zsh");
     writeState(stateDir, {
       version: 2,
       terminals: [
@@ -124,9 +95,10 @@ describe("session ID persistence", () => {
 
     expect(tm.loadState().terminals).toEqual([
       { index: 0, sessionId: SID },
-      { index: 1, name: "named" },
-      { index: 3, name: "fallback" },
     ]);
+    expect(log.lines).toContain(
+      "3 legacy name-only entries ignored (run scripts/migrate-name-only.py before upgrading)",
+    );
   });
 
   it("restore prefers sessionId over name in the resume command", () => {
@@ -141,13 +113,6 @@ describe("session ID persistence", () => {
       `claude --dangerously-skip-permissions --resume '${SID}'`,
     );
     expect(command).not.toContain("display-name");
-  });
-
-  it("restore falls back to name for legacy entries", () => {
-    writeState(stateDir, { version: 1, terminals: [{ index: 0, name: "legacy" }] });
-    const [terminal] = tm.restoreTerminals();
-
-    expectZshRestore(terminal, "claude --dangerously-skip-permissions --resume 'legacy'");
   });
 
   it("restore command contains configured resume flags", () => {
@@ -174,8 +139,7 @@ describe("session ID persistence", () => {
     expect(command).not.toContain("touch");
   });
 
-  it("parseSidPayload accepts legacy UUIDs and validated JSON payloads", () => {
-    expect(parseSidPayload(`${SID}\n`)).toEqual({ sessionId: SID });
+  it("parseSidPayload accepts validated JSON payloads only", () => {
     expect(parseSidPayload(JSON.stringify({ sessionId: SID, cwd: "/tmp/project" }))).toEqual({
       sessionId: SID,
       cwd: "/tmp/project",
@@ -188,16 +152,16 @@ describe("session ID persistence", () => {
   });
 
   it("state round-trip preserves the captured working directory", () => {
-    tm.createTerminal();
-    tm.setSessionId(0, SID, "/tmp/project");
+    const terminal = tm.createTerminal();
+    tm.adoptWithSessionId(terminal, SID, "/tmp/project");
 
     expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: SID, cwd: "/tmp/project" }]);
   });
 
   it("a later capture without cwd clears the previously captured directory", () => {
-    tm.createTerminal();
-    tm.setSessionId(0, SID, "/tmp/project");
-    tm.setSessionId(0, OTHER_SID);
+    const terminal = tm.createTerminal();
+    tm.adoptWithSessionId(terminal, SID, "/tmp/project");
+    tm.adoptWithSessionId(terminal, OTHER_SID);
 
     expect(tm.loadState().terminals).toEqual([{ index: 0, sessionId: OTHER_SID }]);
   });
@@ -231,9 +195,7 @@ describe("session ID persistence", () => {
 
 describe("SignalWatcher session IDs", () => {
   async function flushPidLane(): Promise<void> {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let index = 0; index < 10; index++) await Promise.resolve();
   }
 
   function makeWatcherFixture() {
@@ -241,8 +203,9 @@ describe("SignalWatcher session IDs", () => {
     const signalBaseDir = makeTmpDir();
     const signalDir = makeTmpDir();
     const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-    const callback = vi.fn(() => true);
-    const pidCallback = vi.fn(async () => true);
+    const log = makeLog();
+    const pidCallback = vi.fn(async () => "adopted" as const);
+    const snapshot = vi.fn(async () => new Map());
     const show = vi.fn();
     const originalCreateStatusBarItem = window.createStatusBarItem;
     (window as any).createStatusBarItem = () => ({
@@ -254,10 +217,10 @@ describe("SignalWatcher session IDs", () => {
       hide: vi.fn(),
       dispose: vi.fn(),
     });
-    const watcher = new SignalWatcher(signalDir, tm, makeLog().channel, callback, 4, pidCallback);
+    const watcher = new SignalWatcher(signalDir, tm, log.channel, 4, pidCallback, snapshot);
     const context = { subscriptions: [] } as unknown as import("vscode").ExtensionContext;
     return {
-      signalDir, callback, pidCallback, show, watcher, context,
+      signalDir, pidCallback, snapshot, show, watcher, context, lines: log.lines,
       cleanup: () => {
         watcher.dispose();
         tm.disposeAll();
@@ -269,105 +232,94 @@ describe("SignalWatcher session IDs", () => {
     };
   }
 
-  it(".sid ingestion deferred until restore completes, then file deleted, not shown in status bar", () => {
-    const f = makeWatcherFixture();
-    const sidPath = path.join(f.signalDir, "7.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
-
-    f.watcher.start(f.context);
-    expect(f.callback).not.toHaveBeenCalled(); // restore pending — must not ingest yet
-    expect(fs.existsSync(sidPath)).toBe(true);
-
-    f.watcher.markRestoreComplete();
-    expect(f.callback).toHaveBeenCalledWith(7, SID, undefined);
-    expect(fs.existsSync(sidPath)).toBe(false);
-    expect(f.show).not.toHaveBeenCalled();
-
-    f.cleanup();
-  });
-
-  it("sid file kept for retry when persistence fails, discarded after the window", () => {
-    vi.useFakeTimers();
-    const f = makeWatcherFixture();
-    f.callback.mockReturnValue(false); // persistence failing (untracked index / disk error)
-    const sidPath = path.join(f.signalDir, "5.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
-
-    f.watcher.start(f.context);
-    f.watcher.markRestoreComplete();
-    expect(f.callback).toHaveBeenCalledWith(5, SID, undefined);
-    expect(fs.existsSync(sidPath)).toBe(true); // kept — next poll retries
-
-    const past = new Date(Date.now() - 61_000);
-    fs.utimesSync(sidPath, past, past); // sat unprocessed past the retry window
-    vi.advanceTimersByTime(10_000);
-
-    expect(fs.existsSync(sidPath)).toBe(false); // discarded as garbage
-
-    vi.useRealTimers();
-    f.cleanup();
-  });
-
-  it("partial .sid file is kept and ingested once the writer finishes", () => {
-    vi.useFakeTimers();
-    const f = makeWatcherFixture();
-    const sidPath = path.join(f.signalDir, "3.sid");
-    fs.writeFileSync(sidPath, ""); // truncate-then-write race: watcher sees empty file
-
-    f.watcher.start(f.context);
-    f.watcher.markRestoreComplete();
-    expect(f.callback).not.toHaveBeenCalled();
-    expect(fs.existsSync(sidPath)).toBe(true); // NOT deleted — writer may still be mid-write
-
-    fs.writeFileSync(sidPath, `${SID}\n`);
-    vi.advanceTimersByTime(10_000); // next poll picks it up
-
-    expect(f.callback).toHaveBeenCalledWith(3, SID, undefined);
-    expect(fs.existsSync(sidPath)).toBe(false);
-
-    vi.useRealTimers();
-    f.cleanup();
-  });
-
   it("pid sid file invokes the resolver callback and is unlinked on success", async () => {
     const f = makeWatcherFixture();
     const sidPath = path.join(f.signalDir, "pid-4321.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
 
     f.watcher.start(f.context);
     f.watcher.markRestoreComplete();
     await flushPidLane();
 
-    expect(f.pidCallback).toHaveBeenCalledWith(4321, SID, undefined);
+    expect(f.pidCallback).toHaveBeenCalledWith(
+      4321,
+      SID,
+      undefined,
+      expect.any(Number),
+      expect.any(Promise),
+    );
     expect(fs.existsSync(sidPath)).toBe(false);
     f.cleanup();
   });
 
-  it("pid sid file is retained after callback failure, then discarded after the retry window", async () => {
-    vi.useFakeTimers();
+  it("a ten-minute-old pid sid file is still resolved and adopted", async () => {
     const f = makeWatcherFixture();
-    f.pidCallback.mockResolvedValue(false);
     const sidPath = path.join(f.signalDir, "pid-4321.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
+    const old = new Date(Date.now() - 10 * 60 * 1000);
+    fs.utimesSync(sidPath, old, old);
 
-    f.watcher.start(f.context);
     f.watcher.markRestoreComplete();
     await flushPidLane();
-    expect(fs.existsSync(sidPath)).toBe(true);
 
-    const past = new Date(Date.now() - 61_000);
-    fs.utimesSync(sidPath, past, past);
-    vi.advanceTimersByTime(10_000);
+    expect(f.pidCallback).toHaveBeenCalledWith(
+      4321,
+      SID,
+      undefined,
+      expect.any(Number),
+      expect.any(Promise),
+    );
+    expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+  });
+
+  it("retry leaves the pid sid file and does not log a discard", async () => {
+    const f = makeWatcherFixture();
+    f.pidCallback.mockResolvedValue("retry");
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
+
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(fs.existsSync(sidPath)).toBe(true);
+    expect(f.lines.some((line) => /discard/i.test(line))).toBe(false);
+    f.cleanup();
+  });
+
+  it("discard unlinks the pid sid file", async () => {
+    const f = makeWatcherFixture();
+    f.pidCallback.mockResolvedValue("discard");
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
+
+    f.watcher.markRestoreComplete();
     await flushPidLane();
 
     expect(fs.existsSync(sidPath)).toBe(false);
+    expect(f.lines).toContain("Discarded session ID file for pid 4321 (not a live Claude process): pid-4321.sid");
     f.cleanup();
-    vi.useRealTimers();
+  });
+
+  it("retry gives up after 30 minutes", async () => {
+    const f = makeWatcherFixture();
+    f.pidCallback.mockResolvedValue("retry");
+    const sidPath = path.join(f.signalDir, "pid-4321.sid");
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
+    const old = new Date(Date.now() - 30 * 60 * 1000 - 1);
+    fs.utimesSync(sidPath, old, old);
+
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(fs.existsSync(sidPath)).toBe(false);
+    expect(f.lines).toContain("Gave up on session ID file after 30 minutes: pid-4321.sid");
+    f.cleanup();
   });
 
   it("malformed pid sid filename never invokes the resolver callback", async () => {
     const f = makeWatcherFixture();
-    fs.writeFileSync(path.join(f.signalDir, "pid-abc.sid"), `${SID}\n`);
+    fs.writeFileSync(path.join(f.signalDir, "pid-abc.sid"), JSON.stringify({ sessionId: SID }));
 
     f.watcher.start(f.context);
     f.watcher.markRestoreComplete();
@@ -380,12 +332,12 @@ describe("SignalWatcher session IDs", () => {
   it("pid sid in-flight guard prevents a second scan from resolving the same file", async () => {
     vi.useFakeTimers();
     const f = makeWatcherFixture();
-    let finish: ((done: boolean) => void) | undefined;
-    f.pidCallback.mockImplementation(() => new Promise<boolean>((resolve) => {
+    let finish: ((outcome: "adopted") => void) | undefined;
+    f.pidCallback.mockImplementation(() => new Promise<"adopted">((resolve) => {
       finish = resolve;
     }));
     const sidPath = path.join(f.signalDir, "pid-4321.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
+    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
 
     f.watcher.start(f.context);
     f.watcher.markRestoreComplete();
@@ -394,26 +346,11 @@ describe("SignalWatcher session IDs", () => {
     vi.advanceTimersByTime(10_000);
     expect(f.pidCallback).toHaveBeenCalledTimes(1);
 
-    finish?.(true);
+    finish?.("adopted");
     await flushPidLane();
     expect(fs.existsSync(sidPath)).toBe(false);
     f.cleanup();
     vi.useRealTimers();
-  });
-
-  it("stale pid sid file is removed without invoking the resolver callback", async () => {
-    const f = makeWatcherFixture();
-    const sidPath = path.join(f.signalDir, "pid-4321.sid");
-    fs.writeFileSync(sidPath, `${SID}\n`);
-    const stale = new Date(Date.now() - 120_000);
-    fs.utimesSync(sidPath, stale, stale);
-
-    f.watcher.markRestoreComplete();
-    await flushPidLane();
-
-    expect(f.pidCallback).not.toHaveBeenCalled();
-    expect(fs.existsSync(sidPath)).toBe(false);
-    f.cleanup();
   });
 
   it("pid sid JSON payload passes its cwd to the resolver callback", async () => {
@@ -424,19 +361,13 @@ describe("SignalWatcher session IDs", () => {
     f.watcher.markRestoreComplete();
     await flushPidLane();
 
-    expect(f.pidCallback).toHaveBeenCalledWith(4321, SID, "/tmp/project");
-    expect(fs.existsSync(sidPath)).toBe(false);
-    f.cleanup();
-  });
-
-  it("legacy index sid JSON payload passes its cwd to the persistence callback", () => {
-    const f = makeWatcherFixture();
-    const sidPath = path.join(f.signalDir, "7.sid");
-    fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID, cwd: "/tmp/project" }));
-
-    f.watcher.markRestoreComplete();
-
-    expect(f.callback).toHaveBeenCalledWith(7, SID, "/tmp/project");
+    expect(f.pidCallback).toHaveBeenCalledWith(
+      4321,
+      SID,
+      "/tmp/project",
+      expect.any(Number),
+      expect.any(Promise),
+    );
     expect(fs.existsSync(sidPath)).toBe(false);
     f.cleanup();
   });
@@ -444,17 +375,17 @@ describe("SignalWatcher session IDs", () => {
   it("pid sid file rewritten during resolution is left for the next scan", async () => {
     const f = makeWatcherFixture();
     const sidPath = path.join(f.signalDir, "pid-4321.sid");
-    let finish: ((done: boolean) => void) | undefined;
+    let finish: ((outcome: "adopted") => void) | undefined;
     f.pidCallback
       .mockImplementationOnce(() => {
         fs.writeFileSync(sidPath, JSON.stringify({ sessionId: OTHER_SID, cwd: "/tmp/second" }));
-        return new Promise<boolean>((resolve) => { finish = resolve; });
+        return new Promise<"adopted">((resolve) => { finish = resolve; });
       })
-      .mockResolvedValueOnce(true);
+      .mockResolvedValueOnce("adopted");
     fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID, cwd: "/tmp/first" }));
 
     f.watcher.markRestoreComplete();
-    finish?.(true);
+    finish?.("adopted");
     await flushPidLane();
 
     expect(fs.existsSync(sidPath)).toBe(true);
@@ -466,8 +397,35 @@ describe("SignalWatcher session IDs", () => {
     f.watcher.markRestoreComplete();
     await flushPidLane();
 
-    expect(f.pidCallback).toHaveBeenNthCalledWith(2, 4321, OTHER_SID, "/tmp/second");
+    expect(f.pidCallback).toHaveBeenNthCalledWith(
+      2,
+      4321,
+      OTHER_SID,
+      "/tmp/second",
+      expect.any(Number),
+      expect.any(Promise),
+    );
     expect(fs.existsSync(sidPath)).toBe(false);
+    f.cleanup();
+  });
+
+  it("takes one process snapshot for three pid files in one poll pass", async () => {
+    const f = makeWatcherFixture();
+    for (const pid of [4321, 4322, 4323]) {
+      fs.writeFileSync(
+        path.join(f.signalDir, `pid-${pid}.sid`),
+        JSON.stringify({ sessionId: SID }),
+      );
+    }
+
+    f.watcher.markRestoreComplete();
+    await flushPidLane();
+
+    expect(f.pidCallback).toHaveBeenCalledTimes(3);
+    expect(f.snapshot).toHaveBeenCalledTimes(1);
+    const processPromises = f.pidCallback.mock.calls.map((call) => call[4]);
+    expect(processPromises[1]).toBe(processPromises[0]);
+    expect(processPromises[2]).toBe(processPromises[0]);
     f.cleanup();
   });
 });

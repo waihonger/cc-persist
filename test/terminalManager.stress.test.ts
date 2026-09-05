@@ -5,6 +5,8 @@ import * as os from "os";
 import { TerminalManager, isValidSessionName } from "../src/terminalManager";
 import { _closeTerminal, TerminalExitReason, window } from "vscode";
 
+const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress-"));
 }
@@ -38,10 +40,10 @@ describe("STRESS: State file with duplicate indices", () => {
 
   it("duplicate indices are deduplicated — first wins", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "session-a", index: 0 },
-        { name: "session-b", index: 0 },
+        { name: "session-a", index: 0, sessionId: SID },
+        { name: "session-b", index: 0, sessionId: SID },
       ],
     });
 
@@ -55,10 +57,10 @@ describe("STRESS: State file with duplicate indices", () => {
 
   it("duplicate index does not corrupt nextIndex calculation", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "alpha", index: 5 },
-        { name: "beta", index: 5 },
+        { name: "alpha", index: 5, sessionId: SID },
+        { name: "beta", index: 5, sessionId: SID },
       ],
     });
 
@@ -88,8 +90,8 @@ describe("STRESS: State file with invalid indices", () => {
 
   it("negative index is filtered out by loadState", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "negative", index: -1 }],
+      version: 2,
+      terminals: [{ name: "negative", index: -1, sessionId: SID }],
     });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -99,8 +101,8 @@ describe("STRESS: State file with invalid indices", () => {
 
   it("NaN index (null in JSON) is filtered out by loadState", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "nan-session", index: null }],
+      version: 2,
+      terminals: [{ name: "nan-session", index: null, sessionId: SID }],
     });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -110,8 +112,8 @@ describe("STRESS: State file with invalid indices", () => {
 
   it("huge index beyond MAX_SAFE_INTEGER is filtered out", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "huge", index: Number.MAX_SAFE_INTEGER + 1 }],
+      version: 2,
+      terminals: [{ name: "huge", index: Number.MAX_SAFE_INTEGER + 1, sessionId: SID }],
     });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -121,8 +123,8 @@ describe("STRESS: State file with invalid indices", () => {
 
   it("large but valid index is accepted", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "large", index: 50000 }],
+      version: 2,
+      terminals: [{ name: "large", index: 50000, sessionId: SID }],
     });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -132,8 +134,8 @@ describe("STRESS: State file with invalid indices", () => {
 
   it("fractional index is filtered out", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "frac", index: 1.5 }],
+      version: 2,
+      terminals: [{ name: "frac", index: 1.5, sessionId: SID }],
     });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -143,12 +145,12 @@ describe("STRESS: State file with invalid indices", () => {
 
   it("valid entries survive alongside invalid ones", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "bad", index: -1 },
-        { name: "good", index: 0 },
-        { name: "also-bad", index: 1.5 },
-        { name: "also-good", index: 3 },
+        { name: "bad", index: -1, sessionId: SID },
+        { name: "good", index: 0, sessionId: SID },
+        { name: "also-bad", index: 1.5, sessionId: SID },
+        { name: "also-good", index: 3, sessionId: SID },
       ],
     });
 
@@ -192,6 +194,7 @@ describe("STRESS: Rapid create-then-close cycles", () => {
   it("terminal closed during shutdown preserves state on disk", () => {
     const t1 = tm.createTerminal("alive");
     tm.renameTerminal(t1, "alive");
+    tm.adoptWithSessionId(t1, SID);
     tm.saveState();
     tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
     _closeTerminal(t1, TerminalExitReason.Shutdown);
@@ -236,23 +239,6 @@ describe("STRESS: Terminal name changes between create and save", () => {
     expect(state.terminals).toHaveLength(0);
   });
 
-  it("rename causes resume command to use new name", () => {
-    const t = tm.createTerminal("original-session");
-    tm.renameTerminal(t, "original-session");
-    tm.renameTerminal(t, "renamed-session");
-    tm.saveState();
-    tm.disposeAll();
-
-    const tm2 = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog(), undefined, "/bin/zsh");
-    const [terminal] = tm2.restoreTerminals();
-    const opts = (terminal as any).creationOptions;
-    expect(opts.shellPath).toBe("/bin/zsh");
-    expect(opts.shellArgs[0]).toBe("-lc");
-    expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume 'renamed-session'");
-    expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
-
-    tm2.disposeAll();
-  });
 });
 
 describe("STRESS: State file with wrong schema", () => {
@@ -278,19 +264,19 @@ describe("STRESS: State file with wrong schema", () => {
     expect(state.terminals).toHaveLength(0);
   });
 
-  it("version 2 name-only entry is accepted", () => {
+  it("version 2 name-only entry is dropped", () => {
     writeState(stateDir, {
       version: 2,
       terminals: [{ name: "test", index: 0 }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
-    expect(state.terminals).toEqual([{ index: 0, name: "test" }]);
+    expect(state.terminals).toEqual([]);
   });
 
   it("terminals is an object, not array", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: { "0": { name: "test", index: 0 } },
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -300,7 +286,7 @@ describe("STRESS: State file with wrong schema", () => {
 
   it("terminal entries with missing fields — filtered out by loadState", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [{ foo: "bar" }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -310,7 +296,7 @@ describe("STRESS: State file with wrong schema", () => {
 
   it("undefined name in terminal entry — filtered out, no crash", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [{ index: 0 }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -322,8 +308,8 @@ describe("STRESS: State file with wrong schema", () => {
 
   it("null entry in terminals array — filtered out, no crash", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [null, { name: "valid", index: 1 }],
+      version: 2,
+      terminals: [null, { name: "valid", index: 1, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm.loadState();
@@ -333,7 +319,7 @@ describe("STRESS: State file with wrong schema", () => {
 
   it("primitive entries in terminals array — filtered out, no crash", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [42, "hello", true],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
@@ -362,9 +348,11 @@ describe("STRESS: Concurrent saves", () => {
   it("two rapid saves — second overwrites first", () => {
     const t1 = tm.createTerminal("first");
     tm.renameTerminal(t1, "first");
+    tm.adoptWithSessionId(t1, SID);
     tm.saveState();
     const t2 = tm.createTerminal("second");
     tm.renameTerminal(t2, "second");
+    tm.adoptWithSessionId(t2, SID);
     tm.saveState();
 
     const state = tm.loadState();
@@ -375,8 +363,10 @@ describe("STRESS: Concurrent saves", () => {
   it("handleTerminalClosed triggers saveState — interleaving with manual save", () => {
     const t1 = tm.createTerminal("one");
     tm.renameTerminal(t1, "one");
+    tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("two");
     tm.renameTerminal(t2, "two");
+    tm.adoptWithSessionId(t2, SID);
 
     tm.handleTerminalClosed(t1);
     tm.saveState();
@@ -466,10 +456,10 @@ describe("STRESS: restoreTerminals called twice (idempotency)", () => {
 
   it("double restore is idempotent — second call returns empty", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "session-one", index: 0 },
-        { name: "session-two", index: 1 },
+        { name: "session-one", index: 0, sessionId: SID },
+        { name: "session-two", index: 1, sessionId: SID },
       ],
     });
 
@@ -538,11 +528,11 @@ describe("STRESS: createTerminal after restoreTerminals — index collision avoi
 
   it("creates terminal after restoring non-contiguous indices", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "session-a", index: 0 },
-        { name: "session-b", index: 5 },
-        { name: "session-c", index: 3 },
+        { name: "session-a", index: 0, sessionId: SID },
+        { name: "session-b", index: 5, sessionId: SID },
+        { name: "session-c", index: 3, sessionId: SID },
       ],
     });
 

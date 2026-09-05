@@ -14,6 +14,8 @@ import {
   TerminalExitReason,
 } from "vscode";
 
+const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress3-"));
 }
@@ -65,8 +67,8 @@ describe("STRESS3: FIX VERIFIED -- MAX_SAFE_INTEGER index rejected to prevent ov
 
   it("state entry with MAX_SAFE_INTEGER index is filtered by loadState", () => {
     writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "max-idx", index: Number.MAX_SAFE_INTEGER }],
+      version: 2,
+      terminals: [{ name: "max-idx", index: Number.MAX_SAFE_INTEGER, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     const state = tm.loadState();
@@ -75,10 +77,10 @@ describe("STRESS3: FIX VERIFIED -- MAX_SAFE_INTEGER index rejected to prevent ov
 
   it("restoreTerminals skips MAX_SAFE_INTEGER index entries", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "max-idx", index: Number.MAX_SAFE_INTEGER },
-        { name: "valid", index: 5 },
+        { name: "max-idx", index: Number.MAX_SAFE_INTEGER, sessionId: SID },
+        { name: "valid", index: 5, sessionId: SID },
       ],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
@@ -196,10 +198,7 @@ describe("STRESS3: BUG -- signalWatcher onFile accepts all parseInt-parseable fi
 });
 
 // ============================================================
-// ATTACK: Names that pass SAFE_NAME_RE but are dangerous as
-// CLI arguments (e.g. "--help", "--version")
-// Severity: MEDIUM (sendText sends `claude --resume '--help'`
-// which is safe due to single quotes, but worth documenting)
+// Names that are valid display metadata even though they resemble CLI flags.
 // ============================================================
 
 describe("STRESS3: Names starting with -- pass validation", () => {
@@ -215,28 +214,6 @@ describe("STRESS3: Names starting with -- pass validation", () => {
     expect(isValidSessionName("--resume")).toBe(true);
   });
 
-  it("shellArgs wraps -- names in single quotes so they are safe in practice", () => {
-    const stateDir = makeTmpDir();
-    const signalBaseDir = makeTmpDir();
-
-    writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "--help", index: 0 }],
-    });
-
-    const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, undefined, "/bin/zsh");
-    const [terminal] = tm.restoreTerminals();
-    const opts = (terminal as any).creationOptions;
-
-    expect(opts.shellPath).toBe("/bin/zsh");
-    expect(opts.shellArgs[0]).toBe("-lc");
-    expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume '--help'");
-    expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
-
-    tm.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-  });
 });
 
 // ============================================================
@@ -263,6 +240,7 @@ describe("STRESS3: 5000-entry state file performance", () => {
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     for (let i = 0; i < 5000; i++) {
       tm.createTerminal(`session-${i}`);
+      (tm as any).indexToSessionId.set(i, SID);
     }
     const start = performance.now();
     tm.saveState();
@@ -274,8 +252,9 @@ describe("STRESS3: 5000-entry state file performance", () => {
     const terminals = Array.from({ length: 5000 }, (_, i) => ({
       name: `s-${i}`,
       index: i,
+      sessionId: SID,
     }));
-    writeState(stateDir, { version: 1, terminals });
+    writeState(stateDir, { version: 2, terminals });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     const start = performance.now();
@@ -290,8 +269,9 @@ describe("STRESS3: 5000-entry state file performance", () => {
     const terminals = Array.from({ length: 5000 }, (_, i) => ({
       name: `s-${i}`,
       index: i,
+      sessionId: SID,
     }));
-    writeState(stateDir, { version: 1, terminals });
+    writeState(stateDir, { version: 2, terminals });
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     const restored = tm.restoreTerminals();
@@ -306,6 +286,7 @@ describe("STRESS3: 5000-entry state file performance", () => {
     for (let i = 0; i < 5000; i++) {
       const t = tm.createTerminal(`session-${i}`);
       tm.renameTerminal(t, `session-${i}`);
+      (tm as any).indexToSessionId.set(i, SID);
     }
     tm.saveState();
     const state = tm.loadState();
@@ -343,8 +324,10 @@ describe("STRESS3: Periodic save timer interleaving with handleTerminalClosed", 
   it("saveState immediately after handleTerminalClosed does not re-add closed terminal", () => {
     const t1 = tm.createTerminal("alive");
     tm.renameTerminal(t1, "alive");
+    tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("dying");
     tm.renameTerminal(t2, "dying");
+    tm.adoptWithSessionId(t2, SID);
 
     // handleTerminalClosed removes from maps AND saves
     tm.handleTerminalClosed(t2);
@@ -360,8 +343,10 @@ describe("STRESS3: Periodic save timer interleaving with handleTerminalClosed", 
   it("user-close saves state with closed terminal removed", () => {
     const t1 = tm.createTerminal("stays");
     tm.renameTerminal(t1, "stays");
+    tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("will-close");
     tm.renameTerminal(t2, "will-close");
+    tm.adoptWithSessionId(t2, SID);
     tm.saveState();
     expect(tm.loadState().terminals).toHaveLength(2);
 
@@ -660,6 +645,7 @@ describe("STRESS3: disposeAll then saveState writes empty state", () => {
   it("saveState after disposeAll writes current (empty) map to disk", () => {
     const t = tm.createTerminal("important-session");
     tm.renameTerminal(t, "important-session");
+    tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
     // Verify state was saved
@@ -700,6 +686,7 @@ describe("STRESS3: Shutdown close then disposeAll sequence", () => {
   it("disposeAll after a shutdown close preserves the last saved state", () => {
     const t = tm.createTerminal("preserved");
     tm.renameTerminal(t, "preserved");
+    tm.adoptWithSessionId(t, SID);
     tm.saveState();
     tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
 
@@ -718,6 +705,7 @@ describe("STRESS3: Shutdown close then disposeAll sequence", () => {
   it("shutdown close preserves state on disk through dispose sequence", () => {
     const t = tm.createTerminal("test");
     tm.renameTerminal(t, "test");
+    tm.adoptWithSessionId(t, SID);
     tm.saveState();
     tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
     _closeTerminal(t, TerminalExitReason.Shutdown);
@@ -748,27 +736,6 @@ describe("STRESS3: Path-traversal-like names", () => {
     expect(isValidSessionName(".")).toBe(true);
   });
 
-  it("path-traversal names are safe in resume command due to single quotes", () => {
-    const stateDir = makeTmpDir();
-    const signalBaseDir = makeTmpDir();
-
-    writeState(stateDir, {
-      version: 1,
-      terminals: [{ name: "..", index: 0 }],
-    });
-
-    const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, undefined, "/bin/zsh");
-    const [terminal] = tm.restoreTerminals();
-    const opts = (terminal as any).creationOptions;
-    expect(opts.shellPath).toBe("/bin/zsh");
-    expect(opts.shellArgs[0]).toBe("-lc");
-    expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume '..'");
-    expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
-
-    tm.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-  });
 });
 
 // ============================================================
@@ -836,9 +803,9 @@ describe("STRESS3: Two TerminalManager instances reading same state file", () =>
 
   it("two managers restoring from same state creates duplicate terminals", () => {
     writeState(stateDir, {
-      version: 1,
+      version: 2,
       terminals: [
-        { name: "shared-session", index: 0 },
+        { name: "shared-session", index: 0, sessionId: SID },
       ],
     });
 

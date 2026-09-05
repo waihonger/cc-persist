@@ -1,13 +1,22 @@
 import * as vscode from "vscode";
 import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory, signalDir } from "./config";
-import { findOwningShellPid, snapshotProcesses } from "./pidResolver";
-import { SignalWatcher } from "./signalWatcher";
+import { findOwningShellPid, isLiveClaudePid, type ProcEntry } from "./pidResolver";
+import { SignalWatcher, type PidSessionOutcome } from "./signalWatcher";
 import { TerminalManager, isValidSessionName, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
 
-async function adoptPidSession(claudePid: number, sid: string, cwd?: string): Promise<boolean> {
-  if (!terminalManager) return false;
+async function adoptPidSession(
+  claudePid: number,
+  sid: string,
+  cwd: string | undefined,
+  fileMtimeMs: number,
+  processSnapshot: Promise<Map<number, ProcEntry>>,
+): Promise<PidSessionOutcome> {
+  if (!terminalManager) return "retry";
+  const procs = await processSnapshot;
+  if (procs.size === 0) return "retry";
+  if (!isLiveClaudePid(claudePid, procs, fileMtimeMs)) return "discard";
   const terminals = vscode.window.terminals;
   const pidPairs = await Promise.all(terminals.map(async (terminal) => [terminal, await terminal.processId] as const));
   const shellPids = new Set(
@@ -15,13 +24,12 @@ async function adoptPidSession(claudePid: number, sid: string, cwd?: string): Pr
       .filter(([, pid]) => typeof pid === "number")
       .map(([, pid]) => pid as number),
   );
-  const procs = await snapshotProcesses();
   const shellPid = findOwningShellPid(claudePid, procs, shellPids);
-  if (shellPid === null) return false;
+  if (shellPid === null) return "retry";
   const owner = pidPairs.find(([, pid]) => pid === shellPid)?.[0];
-  if (!owner) return false;
-  if (!vscode.window.terminals.includes(owner) || owner.exitStatus !== undefined) return false;
-  return terminalManager.adoptWithSessionId(owner, sid, cwd);
+  if (!owner) return "retry";
+  if (!vscode.window.terminals.includes(owner) || owner.exitStatus !== undefined) return "retry";
+  return terminalManager.adoptWithSessionId(owner, sid, cwd) ? "adopted" : "retry";
 }
 
 export async function activate(
@@ -61,7 +69,6 @@ export async function activate(
     sigDir,
     terminalManager,
     log,
-    (index, sid, cwd) => terminalManager!.setSessionId(index, sid, cwd),
     staleSignalHours,
     adoptPidSession,
   );

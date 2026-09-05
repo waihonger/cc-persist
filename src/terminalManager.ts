@@ -30,11 +30,9 @@ function isValidSessionCwd(cwd: unknown): cwd is string {
     && path.isAbsolute(cwd);
 }
 
-/** Parse the JSON SessionStart payload, while retaining bare UUID compatibility. */
+/** Parse the JSON SessionStart payload. */
 export function parseSidPayload(raw: string): { sessionId: string; cwd?: string } | null {
   const trimmed = raw.trim();
-  if (isValidSessionId(trimmed)) return { sessionId: trimmed };
-
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
@@ -53,21 +51,21 @@ export function isValidIndex(index: unknown): boolean {
   return typeof index === "number" && Number.isInteger(index) && index >= 0 && index < Number.MAX_SAFE_INTEGER;
 }
 
-function normalizeEntry(entry: unknown, version: number): SessionInfo | null {
+function normalizeEntry(entry: unknown): SessionInfo | null {
   if (!entry || typeof entry !== "object") return null;
   const e = entry as Record<string, unknown>;
   if (!isValidIndex(e.index)) return null;
 
   const name = typeof e.name === "string" && isValidSessionName(e.name) ? e.name : undefined;
-  const sessionId = version === 2 && typeof e.sessionId === "string" && isValidSessionId(e.sessionId)
+  const sessionId = typeof e.sessionId === "string" && isValidSessionId(e.sessionId)
     ? e.sessionId
     : undefined;
   const cwd = isValidSessionCwd(e.cwd) ? e.cwd : undefined;
-  if (!sessionId && !name) return null;
+  if (!sessionId) return null;
 
   return {
     index: e.index as number,
-    ...(sessionId ? { sessionId } : {}),
+    sessionId,
     ...(name ? { name } : {}),
     ...(cwd ? { cwd } : {}),
   };
@@ -131,9 +129,18 @@ export class TerminalManager {
       const raw = fs.readFileSync(this.statePath, "utf8");
       this.log.appendLine(`State file contents: ${raw}`);
       const data = JSON.parse(raw);
-      if (data && (data.version === 1 || data.version === 2) && Array.isArray(data.terminals)) {
+      const legacyCount = Array.isArray(data?.terminals)
+        ? data.terminals.filter((entry: unknown) => {
+          if (!entry || typeof entry !== "object") return true;
+          return !isValidSessionId((entry as Record<string, unknown>).sessionId);
+        }).length
+        : 0;
+      if (data?.version === 1 || legacyCount > 0) {
+        this.log.appendLine(`${legacyCount} legacy name-only entries ignored (run scripts/migrate-name-only.py before upgrading)`);
+      }
+      if (data && data.version === 2 && Array.isArray(data.terminals)) {
         const valid = data.terminals
-          .map((e: unknown) => normalizeEntry(e, data.version))
+          .map((e: unknown) => normalizeEntry(e))
           .filter((e: SessionInfo | null): e is SessionInfo => e !== null);
         this.log.appendLine(`Valid entries: ${valid.length}/${data.terminals.length}`);
         return { version: 2, terminals: valid };
@@ -154,10 +161,10 @@ export class TerminalManager {
       const sessionId = this.indexToSessionId.get(index);
       const cwd = this.indexToCwd.get(index);
       const sessionName = this.sessionNames.get(terminal);
-      if (!sessionId && !sessionName) continue;
+      if (!sessionId) continue;
       terminals.push({
         index,
-        ...(sessionId ? { sessionId } : {}),
+        sessionId,
         ...(sessionName ? { name: sessionName } : {}),
         ...(cwd ? { cwd } : {}),
       });
@@ -236,8 +243,7 @@ export class TerminalManager {
         this.nextIndex = info.index + 1;
       }
 
-      const handle = info.sessionId ?? info.name!;
-      const cmd = `claude ${this.resumeFlags} --resume '${handle}'`;
+      const cmd = `claude ${this.resumeFlags} --resume '${info.sessionId}'`;
       const cwd = info.cwd && fs.existsSync(info.cwd) ? info.cwd : this.startDir;
       const shellPath = this.shellPath;
       const shellName = shellPath ? path.basename(shellPath) : "";
@@ -261,7 +267,7 @@ export class TerminalManager {
       this.terminalToIndex.set(terminal, info.index);
       this.indexToTerminal.set(info.index, terminal);
 
-      if (info.sessionId) this.indexToSessionId.set(info.index, info.sessionId);
+      this.indexToSessionId.set(info.index, info.sessionId);
       if (info.cwd) this.indexToCwd.set(info.index, info.cwd);
       if (info.name) this.sessionNames.set(terminal, info.name);
       this.log.appendLine(`Restored terminal ${info.index}: ${info.name ?? info.sessionId}`);
@@ -325,25 +331,6 @@ export class TerminalManager {
     const terminal = this.indexToTerminal.get(index);
     if (!terminal) return undefined;
     return this.sessionNames.get(terminal) ?? terminal.name;
-  }
-
-  /** Returns true only when the session ID was accepted AND persisted to disk —
-   *  the caller keeps the source .sid file for retry on false. */
-  setSessionId(index: number, sid: string, cwd?: string): boolean {
-    if (!isValidIndex(index) || !isValidSessionId(sid)) {
-      this.log.appendLine(`Ignoring invalid session ID for terminal ${index}: ${sid}`);
-      return false;
-    }
-    // Only accept session IDs for live tracked terminals — a stale .sid for an
-    // unknown index must not trigger a save (saving with empty maps would
-    // overwrite state.json and wipe every saved session).
-    if (!this.indexToTerminal.has(index)) {
-      this.log.appendLine(`Ignoring session ID for untracked terminal ${index}`);
-      return false;
-    }
-    this.indexToSessionId.set(index, sid);
-    this.setCwd(index, cwd);
-    return this.saveState();
   }
 
   /** Adopt a terminal cc-persist didn't create and persist its session ID.

