@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { TerminalManager, isValidSessionName } from "../src/terminalManager";
-import { window } from "vscode";
+import { _closeTerminal, _onDidCloseTerminal, TerminalExitReason, window } from "vscode";
 
 const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
 const OTHER_SID = "a4e9761c-5ddc-48aa-a592-6c2bead472e9";
@@ -41,6 +41,15 @@ describe("TerminalManager", () => {
       const state = tm.loadState();
       expect(state.version).toBe(2);
       expect(state.terminals).toEqual([]);
+    });
+
+    it("writes parseable state atomically without leaving a temp file", () => {
+      const terminal = tm.createTerminal();
+      tm.renameTerminal(terminal, "atomic");
+
+      expect(tm.saveState()).toBe(true);
+      expect(() => JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"))).not.toThrow();
+      expect(fs.readdirSync(stateDir).filter((name) => /^state\.json.*\.tmp$/.test(name))).toEqual([]);
     });
 
     it("does not persist terminals before session ID capture or rename", () => {
@@ -98,6 +107,23 @@ describe("TerminalManager", () => {
       const t = tm.createTerminal();
       const opts = (t as any).creationOptions;
       expect(opts.name).toBeUndefined();
+    });
+
+    it("does not set shell options or call sendText for a new terminal", () => {
+      const sendText = vi.fn();
+      const originalCreateTerminal = window.createTerminal;
+      (window as any).createTerminal = (opts: any) => ({
+        ...originalCreateTerminal(opts),
+        sendText,
+      });
+
+      const terminal = tm.createTerminal();
+      const opts = (terminal as any).creationOptions;
+      expect(opts.shellPath).toBeUndefined();
+      expect(opts.shellArgs).toBeUndefined();
+      expect(sendText).not.toHaveBeenCalled();
+
+      (window as any).createTerminal = originalCreateTerminal;
     });
   });
 
@@ -166,7 +192,7 @@ describe("TerminalManager", () => {
       tm.renameTerminal(t1, "first");
       tm.renameTerminal(t2, "second");
       tm.saveState();
-      // exitStatus.reason = Process (default in mock) = user closed
+      // exitStatus.reason = User (default in mock)
       tm.handleTerminalClosed(t1);
       const state = tm.loadState();
       expect(state.terminals).toHaveLength(1);
@@ -181,19 +207,116 @@ describe("TerminalManager", () => {
       expect(callback).toHaveBeenCalledWith(0);
     });
 
-    it("preserves state on disk during shutdown", () => {
+    it.each([
+      ["Shutdown", TerminalExitReason.Shutdown],
+      ["Process", TerminalExitReason.Process],
+      ["Unknown", TerminalExitReason.Unknown],
+      ["Extension", TerminalExitReason.Extension],
+      ["undefined exitStatus", undefined],
+    ])("preserves byte-identical state and skips callbacks for %s", (_label, reason) => {
+      const callback = vi.fn();
+      tm.setOnTerminalClosed(callback);
+      tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
       const t = tm.createTerminal();
       tm.renameTerminal(t, "test");
       tm.saveState();
-      // Simulate shutdown: setDisposing before terminal close events
-      tm.setDisposing();
-      tm.handleTerminalClosed(t);
-      // Terminal still tracked (early return skips cleanup)
+      const before = fs.readFileSync(path.join(stateDir, "state.json"));
+
+      if (reason === undefined) {
+        (t as any).exitStatus = undefined;
+        _onDidCloseTerminal.fire(t);
+      } else {
+        _closeTerminal(t, reason);
+      }
+
       expect(tm.isTracked(t)).toBe(true);
-      // State on disk preserved
-      const state = tm.loadState();
-      expect(state.terminals).toHaveLength(1);
-      expect(state.terminals[0].name).toBe("test");
+      expect(callback).not.toHaveBeenCalled();
+      expect(fs.readFileSync(path.join(stateDir, "state.json"))).toEqual(before);
+    });
+
+    it("prunes and saves for close reason User", () => {
+      const callback = vi.fn();
+      tm.setOnTerminalClosed(callback);
+      tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
+      const t = tm.createTerminal();
+      tm.renameTerminal(t, "test");
+      tm.saveState();
+
+      _closeTerminal(t, TerminalExitReason.User);
+
+      expect(tm.isTracked(t)).toBe(false);
+      expect(callback).toHaveBeenCalledWith(0);
+      expect(tm.loadState().terminals).toEqual([]);
+    });
+  });
+
+  describe("restore command delivery", () => {
+    function restoreWithShell(shellPath: string | undefined) {
+      const sendText = vi.fn();
+      const originalCreateTerminal = window.createTerminal;
+      (window as any).createTerminal = (opts: any) => ({
+        ...originalCreateTerminal(opts),
+        sendText,
+      });
+      const manager = new TerminalManager(
+        stateDir,
+        signalBaseDir,
+        startDir,
+        makeLog(),
+        undefined,
+        shellPath,
+      );
+      const terminals = manager.restoreTerminals();
+      (window as any).createTerminal = originalCreateTerminal;
+      return { manager, sendText, terminals };
+    }
+
+    beforeEach(() => {
+      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({
+        version: 2,
+        terminals: [{ index: 0, sessionId: SID }],
+      }));
+    });
+
+    it("falls back to immediate sendText for an unsupported shell", () => {
+      const { manager, sendText, terminals } = restoreWithShell("/usr/bin/fish");
+      expect(terminals).toHaveLength(1);
+      expect((terminals[0] as any).creationOptions.shellPath).toBeUndefined();
+      expect((terminals[0] as any).creationOptions.shellArgs).toBeUndefined();
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendText).toHaveBeenCalledWith(`claude --dangerously-skip-permissions --resume '${SID}'`);
+      manager.disposeAll();
+    });
+
+    it("falls back to immediate sendText when shellPath is undefined", () => {
+      const { manager, sendText, terminals } = restoreWithShell(undefined);
+      expect(terminals).toHaveLength(1);
+      expect((terminals[0] as any).creationOptions.shellPath).toBeUndefined();
+      expect((terminals[0] as any).creationOptions.shellArgs).toBeUndefined();
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendText).toHaveBeenCalledWith(`claude --dangerously-skip-permissions --resume '${SID}'`);
+      manager.disposeAll();
+    });
+
+    it("uses a login command shell and quoted exec target for bash", () => {
+      const { manager, sendText, terminals } = restoreWithShell("/bin/bash");
+      expect(terminals).toHaveLength(1);
+      const opts = (terminals[0] as any).creationOptions;
+      expect(opts.shellPath).toBe("/bin/bash");
+      expect(opts.shellArgs[0]).toBe("-lc");
+      expect(opts.shellArgs[1]).toBe(`claude --dangerously-skip-permissions --resume '${SID}'; exec '/bin/bash' -il`);
+      expect(sendText).not.toHaveBeenCalled();
+      manager.disposeAll();
+    });
+
+    it("falls back to immediate sendText when shellPath contains a single quote", () => {
+      const { manager, sendText, terminals } = restoreWithShell("/opt/we'ird/zsh");
+      expect(terminals).toHaveLength(1);
+      expect((terminals[0] as any).creationOptions.shellPath).toBeUndefined();
+      expect((terminals[0] as any).creationOptions.shellArgs).toBeUndefined();
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendText).toHaveBeenCalledWith(`claude --dangerously-skip-permissions --resume '${SID}'`);
+      manager.disposeAll();
     });
   });
 
@@ -215,29 +338,21 @@ describe("TerminalManager", () => {
       tm2.disposeAll();
     });
 
-    it("sends claude --resume command for each terminal", () => {
-      vi.useFakeTimers();
+    it("bakes the claude --resume command into zsh shellArgs", () => {
       const t = tm.createTerminal();
       tm.renameTerminal(t, "warroom");
       tm.saveState();
       tm.disposeAll();
 
-      const sendTextCalls: string[] = [];
-      const origCreateTerminal = window.createTerminal;
-      (window as any).createTerminal = (opts: any) => {
-        const t = origCreateTerminal(opts);
-        t.sendText = (text: string) => sendTextCalls.push(text);
-        return t;
-      };
+      const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog(), undefined, "/bin/zsh");
+      const [terminal] = tm2.restoreTerminals();
+      const opts = (terminal as any).creationOptions;
+      expect(opts.shellPath).toBe("/bin/zsh");
+      expect(opts.shellArgs[0]).toBe("-lc");
+      expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume 'warroom'");
+      expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
 
-      const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
-      tm2.restoreTerminals();
-      vi.advanceTimersByTime(3000);
-      expect(sendTextCalls.some(c => c.includes("claude --dangerously-skip-permissions --resume 'warroom'"))).toBe(true);
-
-      (window as any).createTerminal = origCreateTerminal;
       tm2.disposeAll();
-      vi.useRealTimers();
     });
 
     it("skips terminals with unsafe names on restore", () => {

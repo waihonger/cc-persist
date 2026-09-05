@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { TerminalManager, isValidSessionName } from "../src/terminalManager";
-import { window } from "vscode";
+import { _closeTerminal, TerminalExitReason, window } from "vscode";
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress2-"));
@@ -751,7 +751,7 @@ describe("STRESS2: NEW -- state.json is a symlink", () => {
     fs.rmSync(realDir, { recursive: true, force: true });
   });
 
-  it("saveState overwrites symlink target, not the link itself", () => {
+  it("atomic save replaces the symlink without overwriting its target", () => {
     const realDir = makeTmpDir();
     const realPath = path.join(realDir, "real-state.json");
     fs.writeFileSync(realPath, JSON.stringify({ version: 1, terminals: [] }));
@@ -762,9 +762,11 @@ describe("STRESS2: NEW -- state.json is a symlink", () => {
     tm.renameTerminal(t, "via-symlink");
     tm.saveState();
 
-    const realContent = JSON.parse(fs.readFileSync(realPath, "utf8"));
-    expect(realContent.terminals).toHaveLength(1);
-    expect(realContent.terminals[0].name).toBe("via-symlink");
+    expect(fs.lstatSync(path.join(stateDir, "state.json")).isSymbolicLink()).toBe(false);
+    expect(JSON.parse(fs.readFileSync(realPath, "utf8")).terminals).toHaveLength(0);
+    const saved = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+    expect(saved.terminals).toHaveLength(1);
+    expect(saved.terminals[0].name).toBe("via-symlink");
 
     fs.rmSync(realDir, { recursive: true, force: true });
   });
@@ -867,10 +869,9 @@ describe("STRESS2: NEW -- concurrent save during handleTerminalClosed", () => {
       return t;
     });
     tm.saveState();
-    // Simulate shutdown: setDisposing before terminal close events
-    tm.setDisposing();
+    tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
     for (const t of terminals) {
-      tm.handleTerminalClosed(t);
+      _closeTerminal(t, TerminalExitReason.Shutdown);
     }
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(20);
@@ -895,7 +896,7 @@ describe("STRESS2: NEW -- concurrent save during handleTerminalClosed", () => {
   });
 });
 
-describe("STRESS2: NEW -- sendText shell injection via session name in restoreTerminals", () => {
+describe("STRESS2: NEW -- shellArgs injection via session name in restoreTerminals", () => {
   let stateDir: string;
   let signalBaseDir: string;
   let tm: TerminalManager;
@@ -912,13 +913,11 @@ describe("STRESS2: NEW -- sendText shell injection via session name in restoreTe
   });
 
   it("name with single quotes cannot escape the resume command", () => {
-    vi.useFakeTimers();
-    const sendTextCalls: string[] = [];
+    const creationOptions: any[] = [];
     const origCreateTerminal = window.createTerminal;
     (window as any).createTerminal = (opts: any) => {
-      const t = origCreateTerminal(opts);
-      t.sendText = (text: string) => sendTextCalls.push(text);
-      return t;
+      creationOptions.push(opts);
+      return origCreateTerminal(opts);
     };
 
     writeState(stateDir, {
@@ -929,25 +928,25 @@ describe("STRESS2: NEW -- sendText shell injection via session name in restoreTe
       ],
     });
 
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog(), undefined, "/bin/zsh");
     const restored = tm.restoreTerminals();
-    vi.advanceTimersByTime(3000);
 
     expect(restored).toHaveLength(1);
-    expect(sendTextCalls).toHaveLength(1);
-    expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume 'legit-session'");
+    expect(creationOptions).toHaveLength(1);
+    expect(creationOptions[0].shellPath).toBe("/bin/zsh");
+    expect(creationOptions[0].shellArgs[0]).toBe("-lc");
+    expect(creationOptions[0].shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume 'legit-session'");
+    expect(creationOptions[0].shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
 
     (window as any).createTerminal = origCreateTerminal;
-    vi.useRealTimers();
   });
 
-  it("name with dollar sign and backticks cannot reach sendText", () => {
-    const sendTextCalls: string[] = [];
+  it("name with dollar sign and backticks cannot reach shellArgs", () => {
+    const creationOptions: any[] = [];
     const origCreateTerminal = window.createTerminal;
     (window as any).createTerminal = (opts: any) => {
-      const t = origCreateTerminal(opts);
-      t.sendText = (text: string) => sendTextCalls.push(text);
-      return t;
+      creationOptions.push(opts);
+      return origCreateTerminal(opts);
     };
 
     writeState(stateDir, {
@@ -958,10 +957,10 @@ describe("STRESS2: NEW -- sendText shell injection via session name in restoreTe
       ],
     });
 
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog(), undefined, "/bin/zsh");
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(0);
-    expect(sendTextCalls).toHaveLength(0);
+    expect(creationOptions).toHaveLength(0);
 
     (window as any).createTerminal = origCreateTerminal;
   });

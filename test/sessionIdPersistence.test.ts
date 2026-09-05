@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { SignalWatcher } from "../src/signalWatcher";
 import { parseSidPayload, TerminalManager } from "../src/terminalManager";
-import { _attachShellIntegration, window } from "vscode";
+import { window } from "vscode";
 
 const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
 const OTHER_SID = "a4e9761c-5ddc-48aa-a592-6c2bead472e9";
@@ -29,18 +29,13 @@ function writeState(stateDir: string, state: unknown): void {
   fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify(state));
 }
 
-function captureShellCommands(): { calls: string[]; restore: () => void } {
-  const calls: string[] = [];
-  const original = window.createTerminal;
-  (window as any).createTerminal = (options: unknown) => {
-    const terminal = original(options);
-    _attachShellIntegration(terminal, (text: string) => calls.push(text));
-    return terminal;
-  };
-  return {
-    calls,
-    restore: () => { (window as any).createTerminal = original; },
-  };
+function expectZshRestore(terminal: unknown, command: string): string {
+  const options = (terminal as any).creationOptions;
+  expect(options.shellPath).toBe("/bin/zsh");
+  expect(options.shellArgs[0]).toBe("-lc");
+  expect(options.shellArgs[1]).toContain(command);
+  expect(options.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
+  return options.shellArgs[1];
 }
 
 describe("session ID persistence", () => {
@@ -51,7 +46,7 @@ describe("session ID persistence", () => {
   beforeEach(() => {
     stateDir = makeTmpDir();
     signalBaseDir = makeTmpDir();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, undefined, "/bin/zsh");
   });
 
   afterEach(() => {
@@ -139,68 +134,44 @@ describe("session ID persistence", () => {
       version: 2,
       terminals: [{ index: 0, sessionId: SID, name: "display-name" }],
     });
-    const capture = captureShellCommands();
+    const [terminal] = tm.restoreTerminals();
 
-    tm.restoreTerminals();
-
-    expect(capture.calls[0]).toContain(`--resume '${SID}'`);
-    expect(capture.calls[0]).not.toContain("display-name");
-    capture.restore();
+    const command = expectZshRestore(
+      terminal,
+      `claude --dangerously-skip-permissions --resume '${SID}'`,
+    );
+    expect(command).not.toContain("display-name");
   });
 
   it("restore falls back to name for legacy entries", () => {
     writeState(stateDir, { version: 1, terminals: [{ index: 0, name: "legacy" }] });
-    const capture = captureShellCommands();
+    const [terminal] = tm.restoreTerminals();
 
-    tm.restoreTerminals();
-
-    expect(capture.calls[0]).toContain("--resume 'legacy'");
-    capture.restore();
+    expectZshRestore(terminal, "claude --dangerously-skip-permissions --resume 'legacy'");
   });
 
   it("restore command contains configured resume flags", () => {
     tm.disposeAll();
     writeState(stateDir, { version: 2, terminals: [{ index: 0, sessionId: SID }] });
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, 0, "--model opus --verbose");
-    const capture = captureShellCommands();
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, "--model opus --verbose", "/bin/zsh");
 
-    tm.restoreTerminals();
+    const [terminal] = tm.restoreTerminals();
 
-    expect(capture.calls[0]).toContain("claude --model opus --verbose --resume");
-    capture.restore();
+    expectZshRestore(terminal, `claude --model opus --verbose --resume '${SID}'`);
   });
 
   it("invalid resume flags fall back to default", () => {
     tm.disposeAll();
     writeState(stateDir, { version: 2, terminals: [{ index: 0, sessionId: OTHER_SID }] });
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, 0, "--verbose; touch /tmp/pwned");
-    const capture = captureShellCommands();
+    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, "--verbose; touch /tmp/pwned", "/bin/zsh");
 
-    tm.restoreTerminals();
+    const [terminal] = tm.restoreTerminals();
 
-    expect(capture.calls[0]).toContain("claude --dangerously-skip-permissions --resume");
-    expect(capture.calls[0]).not.toContain("touch");
-    capture.restore();
-  });
-
-  it("sendCommand falls back to sendText when shell integration never appears", () => {
-    vi.useFakeTimers();
-    writeState(stateDir, { version: 2, terminals: [{ index: 0, sessionId: SID }] });
-    const calls: string[] = [];
-    const original = window.createTerminal;
-    (window as any).createTerminal = (options: unknown) => {
-      const terminal = original(options);
-      terminal.sendText = (text: string) => calls.push(text);
-      return terminal;
-    };
-
-    tm.restoreTerminals();
-    vi.advanceTimersByTime(2999);
-    expect(calls).toEqual([]);
-    vi.advanceTimersByTime(1);
-    expect(calls[0]).toContain(`--resume '${SID}'`);
-
-    (window as any).createTerminal = original;
+    const command = expectZshRestore(
+      terminal,
+      `claude --dangerously-skip-permissions --resume '${OTHER_SID}'`,
+    );
+    expect(command).not.toContain("touch");
   });
 
   it("parseSidPayload accepts legacy UUIDs and validated JSON payloads", () => {

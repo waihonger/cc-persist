@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { TerminalManager, isValidSessionName } from "../src/terminalManager";
-import { window } from "vscode";
+import { _closeTerminal, TerminalExitReason, window } from "vscode";
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress-"));
@@ -193,12 +193,9 @@ describe("STRESS: Rapid create-then-close cycles", () => {
     const t1 = tm.createTerminal("alive");
     tm.renameTerminal(t1, "alive");
     tm.saveState();
-    // Simulate shutdown: setDisposing before terminal close events
-    tm.setDisposing();
-    tm.handleTerminalClosed(t1);
-    // Terminal still tracked (early return skips cleanup)
+    tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
+    _closeTerminal(t1, TerminalExitReason.Shutdown);
     expect(tm.isTracked(t1)).toBe(true);
-    // State on disk preserved
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(1);
   });
@@ -240,29 +237,21 @@ describe("STRESS: Terminal name changes between create and save", () => {
   });
 
   it("rename causes resume command to use new name", () => {
-    vi.useFakeTimers();
     const t = tm.createTerminal("original-session");
     tm.renameTerminal(t, "original-session");
     tm.renameTerminal(t, "renamed-session");
     tm.saveState();
     tm.disposeAll();
 
-    const sendTextCalls: string[] = [];
-    const origCreateTerminal = window.createTerminal;
-    (window as any).createTerminal = (opts: any) => {
-      const t = origCreateTerminal(opts);
-      t.sendText = (text: string) => sendTextCalls.push(text);
-      return t;
-    };
+    const tm2 = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog(), undefined, "/bin/zsh");
+    const [terminal] = tm2.restoreTerminals();
+    const opts = (terminal as any).creationOptions;
+    expect(opts.shellPath).toBe("/bin/zsh");
+    expect(opts.shellArgs[0]).toBe("-lc");
+    expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume 'renamed-session'");
+    expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
 
-    const tm2 = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
-    tm2.restoreTerminals();
-    vi.advanceTimersByTime(3000);
-    expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume 'renamed-session'");
-
-    (window as any).createTerminal = origCreateTerminal;
     tm2.disposeAll();
-    vi.useRealTimers();
   });
 });
 
@@ -567,7 +556,7 @@ describe("STRESS: createTerminal after restoreTerminals — index collision avoi
   });
 });
 
-describe("STRESS: Disposing callback suppression", () => {
+describe("STRESS: Shutdown callback suppression", () => {
   let stateDir: string;
   let signalBaseDir: string;
   let tm: TerminalManager;
@@ -584,13 +573,12 @@ describe("STRESS: Disposing callback suppression", () => {
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });
 
-  it("onTerminalClosed callback is NOT fired during disposing (early return)", () => {
+  it("onTerminalClosed callback is NOT fired for Shutdown", () => {
     const callback = vi.fn();
     tm.setOnTerminalClosed(callback);
     const t = tm.createTerminal("test");
-    tm.setDisposing();
-    // handleTerminalClosed returns early when disposing — no cleanup, no callback
-    tm.handleTerminalClosed(t);
+    tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
+    _closeTerminal(t, TerminalExitReason.Shutdown);
     expect(callback).not.toHaveBeenCalled();
   });
 });

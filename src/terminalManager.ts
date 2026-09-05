@@ -10,11 +10,6 @@ export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 const RESUME_FLAGS_RE = /^[A-Za-z0-9 _.=-]*$/;
 /** Single source of truth in code; package.json's declared default must match. */
 export const DEFAULT_RESUME_FLAGS = "--dangerously-skip-permissions";
-const SHELL_INTEGRATION_TIMEOUT_MS = 3000;
-
-/** Delay before cleaning up terminal state on close. Gives setDisposing() time to cancel
- *  during shutdown — terminal close events fire before deactivate(). */
-export const CLEANUP_DELAY_MS = 300;
 
 export function isValidSessionName(name: unknown): boolean {
   if (typeof name !== "string") return false;
@@ -89,15 +84,9 @@ export class TerminalManager {
   private readonly indexToCwd = new Map<number, string>();
   private readonly sessionNames = new Map<vscode.Terminal, string>();
   private readonly disposables: vscode.Disposable[] = [];
-  private readonly pendingCleanups = new Map<vscode.Terminal, NodeJS.Timeout>();
-  private readonly pendingCommands = new Map<vscode.Terminal, {
-    timeout: NodeJS.Timeout;
-    listener: vscode.Disposable;
-  }>();
-  private readonly cleanupDelayMs: number;
   private readonly resumeFlags: string;
+  private readonly shellPath: string | undefined;
   private nextIndex = 0;
-  private disposing = false;
   private restored = false;
   private onTerminalClosedCallback: ((index: number) => void) | undefined;
 
@@ -106,14 +95,14 @@ export class TerminalManager {
     signalBaseDir: string,
     startDir: string,
     log: vscode.OutputChannel,
-    cleanupDelayMs = 0,
     resumeFlags = DEFAULT_RESUME_FLAGS,
+    shellPath?: string,
   ) {
     this.stateDir = stateDir;
     this.signalBaseDir = signalBaseDir;
     this.startDir = startDir;
     this.log = log;
-    this.cleanupDelayMs = cleanupDelayMs;
+    this.shellPath = shellPath;
     if (typeof resumeFlags === "string" && RESUME_FLAGS_RE.test(resumeFlags)) {
       this.resumeFlags = resumeFlags;
     } else {
@@ -128,6 +117,12 @@ export class TerminalManager {
 
   private get sigDir(): string {
     return signalDir(this.signalBaseDir);
+  }
+
+  private writeAtomic(filePath: string, data: string): void {
+    const tempPath = `${filePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tempPath, data, { mode: 0o600 });
+    fs.renameSync(tempPath, filePath);
   }
 
   loadState(): SessionState {
@@ -173,7 +168,7 @@ export class TerminalManager {
     let saved = false;
     try {
       fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.statePath, JSON.stringify(state), { mode: 0o600 });
+      this.writeAtomic(this.statePath, JSON.stringify(state));
       this.log.appendLine(`Saved state: ${terminals.length} terminal(s)`);
       saved = true;
     } catch (err) {
@@ -183,11 +178,8 @@ export class TerminalManager {
     // Write names.json for cc-overlord compatibility
     try {
       fs.mkdirSync(this.signalBaseDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(this.signalBaseDir, "names.json"),
-        JSON.stringify(names),
-        { mode: 0o600 },
-      );
+      const namesPath = path.join(this.signalBaseDir, "names.json");
+      this.writeAtomic(namesPath, JSON.stringify(names));
     } catch (err) {
       this.log.appendLine(`Failed to write names.json: ${err}`);
     }
@@ -210,10 +202,6 @@ export class TerminalManager {
 
     this.terminalToIndex.set(terminal, index);
     this.indexToTerminal.set(index, terminal);
-    // Immediate sendText, not sendCommand: the env is already injected via
-    // createTerminal options, this line is belt-and-braces — a delayed fallback
-    // could type into a claude the user has already started in this terminal.
-    terminal.sendText(`export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${index}'`);
     this.log.appendLine(`Created terminal ${index}`);
     return terminal;
   }
@@ -245,14 +233,26 @@ export class TerminalManager {
         this.nextIndex = info.index + 1;
       }
 
-      const terminal = vscode.window.createTerminal({
+      const handle = info.sessionId ?? info.name!;
+      const cmd = `claude ${this.resumeFlags} --resume '${handle}'`;
+      const cwd = info.cwd && fs.existsSync(info.cwd) ? info.cwd : this.startDir;
+      const shellPath = this.shellPath;
+      const shellName = shellPath ? path.basename(shellPath) : "";
+      const useShellArgs = !!shellPath && /^(zsh|bash)$/.test(shellName) && !shellPath.includes("'");
+      const options = {
+        ...(useShellArgs ? {
+          shellPath,
+          shellArgs: ["-lc", `${cmd}; exec '${shellPath}' -il`],
+        } : {}),
         env: {
           DTACH_SIGNAL_DIR: this.sigDir,
           DTACH_SOCKET_INDEX: info.index.toString(),
         },
-        cwd: info.cwd && fs.existsSync(info.cwd) ? info.cwd : this.startDir,
+        cwd,
         isTransient: true,
-      });
+      };
+      const terminal = vscode.window.createTerminal(options);
+      if (!useShellArgs) terminal.sendText(cmd);
 
       this.terminalToIndex.set(terminal, info.index);
       this.indexToTerminal.set(info.index, terminal);
@@ -260,8 +260,6 @@ export class TerminalManager {
       if (info.sessionId) this.indexToSessionId.set(info.index, info.sessionId);
       if (info.cwd) this.indexToCwd.set(info.index, info.cwd);
       if (info.name) this.sessionNames.set(terminal, info.name);
-      const handle = info.sessionId ?? info.name!;
-      this.sendCommand(terminal, `export DTACH_SIGNAL_DIR='${this.sigDir}' DTACH_SOCKET_INDEX='${info.index}' && claude ${this.resumeFlags} --resume '${handle}'`);
       this.log.appendLine(`Restored terminal ${info.index}: ${info.name ?? info.sessionId}`);
       restored.push(terminal);
     }
@@ -273,35 +271,24 @@ export class TerminalManager {
     const index = this.terminalToIndex.get(terminal);
     if (index === undefined) return;
 
-    if (this.disposing) {
-      this.log.appendLine(`Terminal ${index} closed (shutdown) — state on disk preserved`);
+    const reason = terminal.exitStatus?.reason;
+    const prune = reason === vscode.TerminalExitReason.User;
+    // Only User prunes. Process is ambiguous; Shutdown (window close/reload),
+    // Extension, Unknown and undefined also preserve. A spuriously kept entry costs
+    // one extra restored tab, while a spuriously pruned entry loses a session.
+    if (!prune) {
+      this.log.appendLine(`Terminal ${index} closed (reason ${reason ?? "unknown"}) — state on disk preserved`);
       return;
     }
 
-    // Fire signal cleanup callback immediately
     this.onTerminalClosedCallback?.(index);
-
-    // Delay map cleanup + state save so setDisposing() can cancel during shutdown.
-    // Terminal close events fire before deactivate() — without this delay, maps get
-    // emptied and saveState() writes empty state before setDisposing() has a chance to run.
-    const doCleanup = () => {
-      this.pendingCleanups.delete(terminal);
-      this.terminalToIndex.delete(terminal);
-      this.indexToTerminal.delete(index);
-      this.indexToSessionId.delete(index);
-      this.indexToCwd.delete(index);
-      this.sessionNames.delete(terminal);
-      this.clearPendingCommand(terminal);
-      this.saveState();
-      this.log.appendLine(`Terminal ${index} closed by user — state saved, ${this.terminalToIndex.size} remaining`);
-    };
-
-    if (this.cleanupDelayMs === 0) {
-      doCleanup();
-    } else {
-      const timeout = setTimeout(doCleanup, this.cleanupDelayMs);
-      this.pendingCleanups.set(terminal, timeout);
-    }
+    this.terminalToIndex.delete(terminal);
+    this.indexToTerminal.delete(index);
+    this.indexToSessionId.delete(index);
+    this.indexToCwd.delete(index);
+    this.sessionNames.delete(terminal);
+    this.saveState();
+    this.log.appendLine(`Terminal ${index} closed by user — state saved, ${this.terminalToIndex.size} remaining`);
   }
 
   registerEventHandlers(context: vscode.ExtensionContext): void {
@@ -429,53 +416,7 @@ export class TerminalManager {
     this.onTerminalClosedCallback = callback;
   }
 
-  setDisposing(): void {
-    if (this.disposing) return;
-    this.disposing = true;
-    // Cancel pending cleanups from terminal close events that fired before us
-    const cancelledCount = this.pendingCleanups.size;
-    for (const timeout of this.pendingCleanups.values()) {
-      clearTimeout(timeout);
-    }
-    this.pendingCleanups.clear();
-    this.saveState();
-    this.log.appendLine(`Disposing — cancelled ${cancelledCount} pending cleanups, state saved`);
-  }
-
-  private sendCommand(terminal: vscode.Terminal, text: string): void {
-    if (terminal.shellIntegration) {
-      terminal.shellIntegration.executeCommand(text);
-      return;
-    }
-
-    const listener = vscode.window.onDidChangeTerminalShellIntegration((event) => {
-      if (event.terminal !== terminal) return;
-      this.clearPendingCommand(terminal);
-      event.shellIntegration.executeCommand(text);
-    });
-    const timeout = setTimeout(() => {
-      this.clearPendingCommand(terminal);
-      terminal.sendText(text);
-    }, SHELL_INTEGRATION_TIMEOUT_MS);
-    this.pendingCommands.set(terminal, { timeout, listener });
-  }
-
-  private clearPendingCommand(terminal: vscode.Terminal): void {
-    const pending = this.pendingCommands.get(terminal);
-    if (!pending) return;
-    clearTimeout(pending.timeout);
-    pending.listener.dispose();
-    this.pendingCommands.delete(terminal);
-  }
-
   disposeAll(): void {
-    for (const timeout of this.pendingCleanups.values()) {
-      clearTimeout(timeout);
-    }
-    this.pendingCleanups.clear();
-    for (const terminal of this.pendingCommands.keys()) {
-      this.clearPendingCommand(terminal);
-    }
     for (const d of this.disposables) {
       d.dispose();
     }

@@ -9,7 +9,9 @@ import {
   _onDidChangeActiveTerminal,
   _onDidChangeWindowState,
   _setActiveTerminal,
+  _closeTerminal,
   commands,
+  TerminalExitReason,
 } from "vscode";
 
 function makeTmpDir(): string {
@@ -213,34 +215,25 @@ describe("STRESS3: Names starting with -- pass validation", () => {
     expect(isValidSessionName("--resume")).toBe(true);
   });
 
-  it("sendText wraps in single quotes so -- names are safe in practice", () => {
-    vi.useFakeTimers();
+  it("shellArgs wraps -- names in single quotes so they are safe in practice", () => {
     const stateDir = makeTmpDir();
     const signalBaseDir = makeTmpDir();
-
-    const sendTextCalls: string[] = [];
-    const origCreateTerminal = window.createTerminal;
-    (window as any).createTerminal = (opts: any) => {
-      const t = origCreateTerminal(opts);
-      t.sendText = (text: string) => sendTextCalls.push(text);
-      return t;
-    };
 
     writeState(stateDir, {
       version: 1,
       terminals: [{ name: "--help", index: 0 }],
     });
 
-    const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-    tm.restoreTerminals();
-    vi.advanceTimersByTime(3000);
+    const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, undefined, "/bin/zsh");
+    const [terminal] = tm.restoreTerminals();
+    const opts = (terminal as any).creationOptions;
 
-    // Single quotes protect against argument interpretation
-    expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume '--help'");
+    expect(opts.shellPath).toBe("/bin/zsh");
+    expect(opts.shellArgs[0]).toBe("-lc");
+    expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume '--help'");
+    expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
 
-    (window as any).createTerminal = origCreateTerminal;
     tm.disposeAll();
-    vi.useRealTimers();
     fs.rmSync(stateDir, { recursive: true, force: true });
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });
@@ -372,7 +365,7 @@ describe("STRESS3: Periodic save timer interleaving with handleTerminalClosed", 
     tm.saveState();
     expect(tm.loadState().terminals).toHaveLength(2);
 
-    // User closes terminal (exitStatus.reason = Process, the mock default)
+    // User closes terminal (exitStatus.reason = User, the mock default)
     tm.handleTerminalClosed(t2);
 
     // State on disk updated — user close saves
@@ -684,10 +677,10 @@ describe("STRESS3: disposeAll then saveState writes empty state", () => {
 });
 
 // ============================================================
-// ATTACK: setDisposing + disposeAll interaction
+// ATTACK: Shutdown close + disposeAll interaction
 // ============================================================
 
-describe("STRESS3: setDisposing then disposeAll sequence", () => {
+describe("STRESS3: Shutdown close then disposeAll sequence", () => {
   let stateDir: string;
   let signalBaseDir: string;
   let tm: TerminalManager;
@@ -704,22 +697,19 @@ describe("STRESS3: setDisposing then disposeAll sequence", () => {
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });
 
-  it("setDisposing does not save state — state on disk from last rename is preserved", () => {
+  it("disposeAll after a shutdown close preserves the last saved state", () => {
     const t = tm.createTerminal("preserved");
     tm.renameTerminal(t, "preserved");
-    // Simulate what rename command does: save state to disk
     tm.saveState();
+    tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
 
-    tm.setDisposing();
+    _closeTerminal(t, TerminalExitReason.Shutdown);
 
-    // State should still be on disk from the saveState above (not from setDisposing)
     let state = tm.loadState();
     expect(state.terminals).toHaveLength(1);
 
-    // disposeAll clears in-memory maps but does NOT write to disk
     tm.disposeAll();
 
-    // State file should still have the terminal
     state = tm.loadState();
     expect(state.terminals).toHaveLength(1);
     expect(state.terminals[0].name).toBe("preserved");
@@ -729,9 +719,8 @@ describe("STRESS3: setDisposing then disposeAll sequence", () => {
     const t = tm.createTerminal("test");
     tm.renameTerminal(t, "test");
     tm.saveState();
-    tm.setDisposing();
-    // Simulate shutdown close — early return, terminal stays tracked
-    tm.handleTerminalClosed(t);
+    tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
+    _closeTerminal(t, TerminalExitReason.Shutdown);
 
     expect(tm.isTracked(t)).toBe(true);
     tm.disposeAll();
@@ -760,30 +749,23 @@ describe("STRESS3: Path-traversal-like names", () => {
   });
 
   it("path-traversal names are safe in resume command due to single quotes", () => {
-    vi.useFakeTimers();
     const stateDir = makeTmpDir();
     const signalBaseDir = makeTmpDir();
-    const sendTextCalls: string[] = [];
-    const origCreateTerminal = window.createTerminal;
-    (window as any).createTerminal = (opts: any) => {
-      const t = origCreateTerminal(opts);
-      t.sendText = (text: string) => sendTextCalls.push(text);
-      return t;
-    };
 
     writeState(stateDir, {
       version: 1,
       terminals: [{ name: "..", index: 0 }],
     });
 
-    const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-    tm.restoreTerminals();
-    vi.advanceTimersByTime(3000);
-    expect(sendTextCalls[0]).toContain("claude --dangerously-skip-permissions --resume '..'");
+    const tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel, undefined, "/bin/zsh");
+    const [terminal] = tm.restoreTerminals();
+    const opts = (terminal as any).creationOptions;
+    expect(opts.shellPath).toBe("/bin/zsh");
+    expect(opts.shellArgs[0]).toBe("-lc");
+    expect(opts.shellArgs[1]).toContain("claude --dangerously-skip-permissions --resume '..'");
+    expect(opts.shellArgs[1]).toMatch(/; exec '\/bin\/zsh' -il$/);
 
-    (window as any).createTerminal = origCreateTerminal;
     tm.disposeAll();
-    vi.useRealTimers();
     fs.rmSync(stateDir, { recursive: true, force: true });
     fs.rmSync(signalBaseDir, { recursive: true, force: true });
   });

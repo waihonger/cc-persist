@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory, signalDir } from "./config";
 import { findOwningShellPid, snapshotProcesses } from "./pidResolver";
 import { SignalWatcher } from "./signalWatcher";
-import { TerminalManager, isValidSessionName, CLEANUP_DELAY_MS, DEFAULT_RESUME_FLAGS } from "./terminalManager";
+import { TerminalManager, isValidSessionName, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
 
@@ -48,22 +48,13 @@ export async function activate(
   log.appendLine(`Signal dir: ${sigDir}`);
   log.appendLine(`Start dir: ${startDir}`);
 
-  terminalManager = new TerminalManager(stateDir, signalBaseDir, startDir, log, CLEANUP_DELAY_MS, resumeFlags);
+  terminalManager = new TerminalManager(stateDir, signalBaseDir, startDir, log, resumeFlags, vscode.env.shell);
   try {
     terminalManager.writeWorkspaceMetadata();
   } catch (err) {
     log.appendLine(`Failed to write workspace metadata: ${err}`);
   }
   terminalManager.registerEventHandlers(context);
-
-  // Set disposing flag early via subscription cleanup — fires before/alongside
-  // terminal close events during shutdown, giving us a second chance to set the
-  // flag before handleTerminalClosed runs.
-  context.subscriptions.push({
-    dispose: () => {
-      terminalManager?.setDisposing();
-    },
-  });
 
   // Signal watcher for Claude Code task completion notifications
   const signalWatcher = new SignalWatcher(
@@ -163,6 +154,4 @@ export async function activate(
   log.appendLine("cc-persist activated");
 }
 
-export function deactivate(): void {
-  terminalManager?.setDisposing();
-}
+export function deactivate(): void {}

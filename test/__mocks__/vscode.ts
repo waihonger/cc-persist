@@ -15,7 +15,6 @@ export const _onDidCloseTerminal = new EventEmitter();
 export const _onDidOpenTerminal = new EventEmitter();
 export const _onDidChangeActiveTerminal = new EventEmitter();
 export const _onDidChangeWindowState = new EventEmitter();
-export const _onDidChangeTerminalShellIntegration = new EventEmitter();
 export let _activeTerminal: unknown = undefined;
 export function _setActiveTerminal(t: unknown) { _activeTerminal = t; }
 
@@ -37,12 +36,8 @@ export const workspace = {
 
 let _terminals: unknown[] = [];
 export function _setTerminals(t: unknown[]) { _terminals = t; }
-export function _attachShellIntegration(terminal: unknown, executeCommand: (text: string) => unknown = () => {}) {
-  const shellIntegration = { executeCommand };
-  (terminal as { shellIntegration?: unknown }).shellIntegration = shellIntegration;
-  _onDidChangeTerminalShellIntegration.fire({ terminal, shellIntegration });
-  return shellIntegration;
-}
+
+export const env = { shell: "/bin/zsh" };
 
 export const window = {
   get terminals() { return _terminals; },
@@ -56,14 +51,13 @@ export const window = {
   showWarningMessage: () => {},
   showInformationMessage: () => {},
   createTerminal: (opts: unknown) => {
-    const t = { name: (opts as Record<string, unknown>)?.name || "Terminal", creationOptions: opts, show: () => {}, dispose: () => {}, processId: Promise.resolve(999), sendText: () => {}, exitStatus: { reason: 2 /* Process */ } };
+    const t = { name: (opts as Record<string, unknown>)?.name || "Terminal", creationOptions: opts, show: () => {}, dispose: () => {}, processId: Promise.resolve(999), sendText: () => {}, exitStatus: { reason: 3 /* User */ } };
     return t;
   },
   onDidCloseTerminal: _onDidCloseTerminal.event,
   onDidOpenTerminal: _onDidOpenTerminal.event,
   onDidChangeActiveTerminal: _onDidChangeActiveTerminal.event,
   onDidChangeWindowState: _onDidChangeWindowState.event,
-  onDidChangeTerminalShellIntegration: _onDidChangeTerminalShellIntegration.event,
   registerTerminalProfileProvider: () => ({ dispose: () => {} }),
   createStatusBarItem: () => ({
     text: "",
@@ -76,6 +70,11 @@ export const window = {
   }),
   showQuickPick: async () => undefined,
 };
+
+export function _closeTerminal(terminal: any, reason = TerminalExitReason.User) {
+  terminal.exitStatus = { reason };
+  _onDidCloseTerminal.fire(terminal);
+}
 
 export const commands = {
   registerCommand: (_cmd: string, _cb: Callback) => ({ dispose: () => {} }),
@@ -102,5 +101,6 @@ export enum TerminalExitReason {
   Unknown = 0,
   Shutdown = 1,
   Process = 2,
-  Extension = 3,
+  User = 3,
+  Extension = 4,
 }
