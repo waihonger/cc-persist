@@ -89,6 +89,11 @@ describe("TerminalManager", () => {
   });
 
   describe("terminal creation", () => {
+    it("passes a blank ThemeIcon so tabs show no terminal icon", () => {
+      const t = tm.createTerminal();
+      expect((t as any).creationOptions.iconPath).toEqual({ id: "none" });
+    });
+
     it("creates terminal with monotonically increasing index", () => {
       const t1 = tm.createTerminal("first");
       const t2 = tm.createTerminal("second");
@@ -333,6 +338,7 @@ describe("TerminalManager", () => {
       const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
       const terminals = tm2.restoreTerminals();
       expect(terminals).toHaveLength(2);
+      for (const t of terminals) expect((t as any).creationOptions.iconPath).toEqual({ id: "none" });
       expect(tm2.getSavedName(0)).toBe("warroom");
       expect(tm2.getSavedName(1)).toBe("alan");
       tm2.disposeAll();

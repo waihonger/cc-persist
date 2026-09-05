@@ -198,6 +198,9 @@ export class TerminalManager {
       },
       cwd: this.startDir,
       isTransient: true,
+      // Unknown codicon id renders no glyph and reserves no width; bypasses the
+      // profile-icon lookup that would otherwise show VS Code's terminal icon.
+      iconPath: new vscode.ThemeIcon("none"),
     });
 
     this.terminalToIndex.set(terminal, index);
@@ -250,6 +253,7 @@ export class TerminalManager {
         },
         cwd,
         isTransient: true,
+        iconPath: new vscode.ThemeIcon("none"),
       };
       const terminal = vscode.window.createTerminal(options);
       if (!useShellArgs) terminal.sendText(cmd);

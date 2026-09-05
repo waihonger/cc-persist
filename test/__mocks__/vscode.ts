@@ -39,6 +39,10 @@ export function _setTerminals(t: unknown[]) { _terminals = t; }
 
 export const env = { shell: "/bin/zsh" };
 
+export class ThemeIcon {
+  constructor(public readonly id: string) {}
+}
+
 export const window = {
   get terminals() { return _terminals; },
   get activeTerminal() { return _activeTerminal; },
