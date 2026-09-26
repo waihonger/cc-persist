@@ -1,4 +1,4 @@
-import { execFile } from "child_process";
+import { execFile, type ChildProcess } from "child_process";
 import { promises as fs } from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -13,6 +13,7 @@ export interface RegistryRow {
   cwd?: string;
   name?: string;
   status?: string;
+  startedAt?: number;
   kind: "interactive" | "background";
 }
 
@@ -35,22 +36,42 @@ export function parseRegistryRow(raw: unknown): RegistryRow | null {
     ...(typeof row.cwd === "string" ? { cwd: row.cwd } : {}),
     ...(typeof row.name === "string" ? { name: row.name } : {}),
     ...(typeof row.status === "string" ? { status: row.status } : {}),
+    ...(typeof row.startedAt === "number" && Number.isFinite(row.startedAt) && row.startedAt > 0
+      ? { startedAt: row.startedAt } : {}),
   };
 }
 
-function runAgents(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // execFile uses pipes for stdio and does not invoke a shell.
-    execFile(
-      "claude",
-      ["agents", "--json"],
-      { encoding: "utf8", timeout: 5000, shell: false },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout);
-      },
-    );
+async function runAgentsWithDeadline(runAgents?: () => Promise<string>): Promise<string> {
+  let child: ChildProcess | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<string>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error("Session registry CLI read exceeded its 6 second deadline"));
+      try {
+        child?.kill("SIGKILL");
+      } catch {
+        // Fall back even if terminating the child fails.
+      }
+    }, 6000);
   });
+  try {
+    const read = runAgents ? Promise.resolve().then(() => runAgents()) : new Promise<string>((resolve, reject) => {
+      // execFile uses pipes for stdio and does not invoke a shell.
+      child = execFile(
+        "claude",
+        ["agents", "--json"],
+        { encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", shell: false },
+        (error, stdout) => {
+          if (error) reject(error);
+          else resolve(stdout);
+        },
+      );
+    });
+    // Independent of execFile's exit callback, including for injected readers.
+    return await Promise.race([read, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function readRegistryFiles(sessionsDir: string): Promise<RegistryRow[]> {
@@ -78,7 +99,7 @@ export async function readRegistry(opts: {
   runAgents?: () => Promise<string>;
 } = {}): Promise<RegistryRow[]> {
   try {
-    const output = await (opts.runAgents ?? runAgents)();
+    const output = await runAgentsWithDeadline(opts.runAgents);
     const raw: unknown = JSON.parse(output);
     if (Array.isArray(raw)) {
       const rows = raw.map(parseRegistryRow).filter((row): row is RegistryRow => row !== null);

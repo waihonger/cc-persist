@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFile, type ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { parseRegistryRow, readRegistry, resolveSessionsDir } from "../src/sessionRegistry";
+
+vi.mock("child_process", () => ({ execFile: vi.fn() }));
 
 const sample = {
   pid: 88212,
@@ -21,12 +24,24 @@ const sample = {
 const expected = {
   pid: sample.pid, sessionId: sample.sessionId, cwd: sample.cwd,
   kind: "interactive", name: sample.name, status: sample.status,
+  startedAt: sample.startedAt,
 };
 
 describe("parseRegistryRow", () => {
   it("accepts the sample interactive row and selects supported fields", () => {
     expect(parseRegistryRow(sample)).toEqual(expected);
   });
+
+  it.each([1, 0.5, sample.startedAt])("keeps finite positive startedAt %s", (startedAt) => {
+    expect(parseRegistryRow({ ...sample, startedAt })).toEqual({ ...expected, startedAt });
+  });
+
+  it.each([0, -1, NaN, Infinity, -Infinity, "1790397130389", null, undefined])
+    ("omits invalid startedAt %s without dropping the row", (startedAt) => {
+      const parsed = parseRegistryRow({ ...sample, startedAt });
+      expect(parsed).toMatchObject({ pid: sample.pid, sessionId: sample.sessionId, kind: "interactive" });
+      expect(parsed).not.toHaveProperty("startedAt");
+    });
 
   it("defaults missing kind to interactive and ignores non-string optional fields", () => {
     expect(parseRegistryRow({ pid: sample.pid, sessionId: sample.sessionId, cwd: 1, name: null, status: false }))
@@ -67,17 +82,20 @@ describe("readRegistry", () => {
   let sessionsDir: string;
 
   beforeEach(() => {
+    vi.mocked(execFile).mockReset();
     sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-registry-reader-"));
     fs.writeFileSync(path.join(sessionsDir, `${sample.pid}.json`), JSON.stringify(sample));
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     for (const file of fs.readdirSync(sessionsDir)) fs.unlinkSync(path.join(sessionsDir, file));
     fs.rmdirSync(sessionsDir);
   });
 
   it("uses injected agents JSON instead of falling back to files", async () => {
+    vi.useFakeTimers();
     const readdir = vi.spyOn(fs.promises, "readdir");
     const readFile = vi.spyOn(fs.promises, "readFile");
     const cliRow = { ...sample, pid: 44584, name: "cli-session" };
@@ -90,6 +108,41 @@ describe("readRegistry", () => {
     expect(runAgents).toHaveBeenCalledExactlyOnceWith();
     expect(readdir).not.toHaveBeenCalled();
     expect(readFile).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("falls back at the six-second deadline when an injected reader never resolves", async () => {
+    vi.useFakeTimers();
+    const readdir = vi.spyOn(fs.promises, "readdir");
+    const runAgents = vi.fn(() => new Promise<string>(() => {}));
+    const result = readRegistry({ sessionsDir, runAgents });
+
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(runAgents).toHaveBeenCalledExactlyOnceWith();
+    expect(readdir).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toEqual([expected]);
+    expect(readdir).toHaveBeenCalledExactlyOnceWith(sessionsDir);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("uses SIGKILL for the CLI timeout and kills the child at the independent deadline", async () => {
+    vi.useFakeTimers();
+    const kill = vi.fn().mockReturnValue(true);
+    vi.mocked(execFile).mockReturnValue({ kill } as unknown as ChildProcess);
+    const result = readRegistry({ sessionsDir });
+
+    expect(execFile).toHaveBeenCalledExactlyOnceWith(
+      "claude", ["agents", "--json"],
+      { encoding: "utf8", timeout: 5000, killSignal: "SIGKILL", shell: false },
+      expect.any(Function),
+    );
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+    expect(await result).toEqual([expected]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("falls back when the command throws, skipping malformed and unrelated files", async () => {
