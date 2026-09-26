@@ -6,6 +6,7 @@ import { readRegistry, resolveSessionsDir } from "./sessionRegistry";
 import { TerminalManager, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
+const pidToTerminal = new Map<number, vscode.Terminal>();
 
 async function adoptPidSession(
   claudePid: number,
@@ -29,7 +30,12 @@ async function adoptPidSession(
   const owner = pidPairs.find(([, pid]) => pid === shellPid)?.[0];
   if (!owner) return "retry";
   if (!vscode.window.terminals.includes(owner) || owner.exitStatus !== undefined) return "retry";
-  return terminalManager.adoptWithSessionId(owner, sid, cwd) ? "adopted" : "retry";
+  if (!terminalManager.adoptWithSessionId(owner, sid, cwd)) return "retry";
+  for (const [pid, terminal] of pidToTerminal) {
+    if (terminal === owner) pidToTerminal.delete(pid);
+  }
+  pidToTerminal.set(claudePid, owner);
+  return "adopted";
 }
 
 export async function activate(
@@ -60,8 +66,30 @@ export async function activate(
 
   // Capture live session IDs from Claude Code's registry after restore completes.
   const registryWatcher = new RegistryWatcher(resolveSessionsDir(), log, adoptPidSession, readRegistry);
+  registryWatcher.onStatusChange = (pid, from, to, row) => {
+    const enabled = vscode.workspace.getConfiguration("cc-persist").get<boolean>("notifications", false);
+    if (!enabled || from !== "busy" || (to !== "idle" && to !== "waiting")) return;
+    const terminal = pidToTerminal.get(pid);
+    if (!terminal || !terminalManager?.isTracked(terminal) || terminal === vscode.window.activeTerminal) return;
+    const label = row.name ?? terminalManager.getIndex(terminal);
+    const notification = to === "idle"
+      ? vscode.window.showInformationMessage(`${label}: done`, "Show")
+      : vscode.window.showWarningMessage(`${label}: needs input`, "Show");
+    void notification.then((choice) => {
+      if (choice === "Show") terminal.show();
+    }, (error: unknown) => {
+      log.appendLine(`Failed to show session notification: ${error}`);
+    });
+  };
   registryWatcher.start();
-  context.subscriptions.push({ dispose: () => registryWatcher.dispose() });
+  context.subscriptions.push(
+    { dispose: () => { registryWatcher.dispose(); pidToTerminal.clear(); } },
+    vscode.window.onDidCloseTerminal((closed) => {
+      for (const [pid, terminal] of pidToTerminal) {
+        if (terminal === closed) pidToTerminal.delete(pid);
+      }
+    }),
+  );
 
   // New terminal command
   context.subscriptions.push(

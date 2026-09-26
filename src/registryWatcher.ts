@@ -20,12 +20,21 @@ export class RegistryWatcher {
   private readonly inFlight = new Set<number>();
   private readonly attempts = new Map<number, number>();
   private readonly retryPids = new Set<number>();
+  private lastStatuses = new Map<number, string | undefined>();
   private started = false;
   private disposed = false;
   private restoreComplete = false;
   private watchFailureLogged = false;
   private reconciling = false;
   private pendingFullScan: boolean | undefined;
+
+  /** Settable callback for status changes between reconciles; never called on first sight. */
+  public onStatusChange?: (
+    pid: number,
+    from: string | undefined,
+    to: string | undefined,
+    row: RegistryRow,
+  ) => void;
 
   constructor(
     private readonly sessionsDir: string,
@@ -96,6 +105,7 @@ export class RegistryWatcher {
     try {
       const rows = await this.read({ sessionsDir: this.sessionsDir });
       if (this.disposed) return;
+      this.updateStatuses(rows);
       if (this.retryTimer) clearTimeout(this.retryTimer);
       this.retryTimer = undefined;
       const retryPids = new Set(this.retryPids);
@@ -131,6 +141,23 @@ export class RegistryWatcher {
       const pending = this.pendingFullScan;
       this.pendingFullScan = undefined;
       if (pending !== undefined && !this.disposed) void this.reconcile(pending);
+    }
+  }
+
+  private updateStatuses(rows: RegistryRow[]): void {
+    const interactiveRows = rows.filter((row) => row.kind === "interactive");
+    const previous = this.lastStatuses;
+    // Replace the map so vanished PIDs are treated as new if they reappear.
+    this.lastStatuses = new Map(interactiveRows.map((row) => [row.pid, row.status]));
+    for (const row of interactiveRows) {
+      if (this.disposed) return;
+      const from = previous.get(row.pid);
+      if (!previous.has(row.pid) || from === row.status) continue;
+      try {
+        this.onStatusChange?.(row.pid, from, row.status, row);
+      } catch (error) {
+        this.log.appendLine(`Status change callback failed for process ${row.pid}: ${error}`);
+      }
     }
   }
 
@@ -172,5 +199,6 @@ export class RegistryWatcher {
     this.retryPids.clear();
     this.attempts.clear();
     this.adopted.clear();
+    this.lastStatuses.clear();
   }
 }
