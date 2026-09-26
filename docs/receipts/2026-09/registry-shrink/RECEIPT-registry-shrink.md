@@ -57,6 +57,9 @@ No stryker in this repo; the negative-control tests stand in.
 | src/registryWatcher.ts | test/registryWatcher.test.ts: "negative control: an empty registry adopts nothing and leaves state.json untouched" (inode + mtime unchanged) |
 | src/extension.ts | test/registryWatcher.test.ts notification block: default off and `{notifications:false}` make zero toast calls; active terminal and unknown pid suppressed |
 | src/config.ts | none new (signalDir deletion only; test/config.test.ts unchanged and green, no signalDir test existed) |
+| package.json | test/registryWatcher.test.ts notification block reads `cc-persist.notifications` through the mock (default false); the manifest entry itself was checked by grep, no mutation test |
+| README.md | none: documentation, verified by the U4 grep (no jq/DTACH/SessionStart/signals/) |
+| CLAUDE.md | none: documentation, verified by the U4 grep (no jq/DTACH/SessionStart/signals/) |
 | src/terminalManager.ts | test/terminalManager.test.ts ("creates terminal without capture environment variables": `opts.env` undefined) + stress2 ("createTerminal/restoreTerminals do not create a signal directory") |
 
 ## Observation run
