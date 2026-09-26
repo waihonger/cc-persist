@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory, signalDir } from "./config";
 import { findOwningShellPid, isLiveClaudePid, type ProcEntry } from "./pidResolver";
-import { SignalWatcher, type PidSessionOutcome } from "./signalWatcher";
-import { TerminalManager, isValidSessionName, DEFAULT_RESUME_FLAGS } from "./terminalManager";
+import { SidWatcher, type PidSessionOutcome } from "./sidWatcher";
+import { TerminalManager, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
 
@@ -41,7 +41,6 @@ export async function activate(
 
   const config = vscode.workspace.getConfiguration("cc-persist");
   const resumeFlags = config.get<string>("resumeFlags", DEFAULT_RESUME_FLAGS);
-  const staleSignalHours = config.get<number>("staleSignalHours", 4);
   const closeRogueTerminals = config.get<boolean>("closeRogueTerminals", true);
 
   const stateDir = resolveStateDir();
@@ -64,55 +63,16 @@ export async function activate(
   }
   terminalManager.registerEventHandlers(context);
 
-  // Signal watcher for Claude Code task completion notifications
-  const signalWatcher = new SignalWatcher(
-    sigDir,
-    terminalManager,
-    log,
-    staleSignalHours,
-    adoptPidSession,
-  );
-  signalWatcher.start(context);
-  context.subscriptions.push({ dispose: () => signalWatcher.dispose() });
-
-  // Connect terminal close → signal cleanup
-  terminalManager.setOnTerminalClosed((index) => signalWatcher.onTerminalClosed(index));
+  // Session-ID watcher: ingests pid-<pid>.sid captures from the SessionStart hook
+  const sidWatcher = new SidWatcher(sigDir, log, adoptPidSession);
+  sidWatcher.start();
+  context.subscriptions.push({ dispose: () => sidWatcher.dispose() });
 
   // New terminal command
   context.subscriptions.push(
     vscode.commands.registerCommand("cc-persist.newTerminal", () =>
       terminalManager!.createTerminal(),
     ),
-  );
-
-  // Rename terminal command
-  context.subscriptions.push(
-    vscode.commands.registerCommand("cc-persist.renameTerminal", async () => {
-      const terminal = vscode.window.activeTerminal;
-      if (!terminal) {
-        vscode.window.showWarningMessage("No active terminal to rename");
-        return;
-      }
-
-      const name = await vscode.window.showInputBox({
-        prompt: "Session display name (optional; session ID is used for resume)",
-        placeHolder: "e.g. warroom",
-        validateInput: (value) => {
-          if (!value) return "Name is required";
-          return isValidSessionName(value) ? null : "Invalid name — use letters, numbers, dashes, underscores, dots, spaces";
-        },
-      });
-      if (!name) return;
-
-      const stored = terminalManager!.renameTerminal(terminal, name);
-      if (!stored) return;
-      if (stored !== name) {
-        vscode.window.showInformationMessage(`Name "${name}" already in use; saved as "${stored}"`);
-      }
-      terminal.sendText(`/rename ${stored}`);
-      terminalManager!.saveState();
-      log.appendLine(`User renamed terminal to: ${stored}`);
-    }),
   );
 
   // Restore saved sessions
@@ -137,7 +97,7 @@ export async function activate(
       rogueWatcher.dispose();
       const terminals = terminalManager!.restoreTerminals();
       terminalManager!.showFirst();
-      signalWatcher.markRestoreComplete();
+      sidWatcher.markRestoreComplete();
       log.appendLine(`Restore complete — ${terminals.length} terminal(s)`);
       if (terminals.length > 0) {
         vscode.window.showInformationMessage(`Restored ${terminals.length} Claude terminal(s)`);
@@ -155,7 +115,7 @@ export async function activate(
     });
     setTimeout(doRestore, 150);
   } else {
-    signalWatcher.markRestoreComplete();
+    sidWatcher.markRestoreComplete();
   }
 
   log.appendLine("cc-persist activated");

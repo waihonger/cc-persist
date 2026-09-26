@@ -2,7 +2,7 @@
   "name": "cc-persist",
   "displayName": "cc-persist",
   "description": "Persistent Claude Code terminal sessions via session ID resume",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "fongy",
   "license": "MIT",
   "engines": {
@@ -27,11 +27,6 @@
           "default": "--dangerously-skip-permissions",
           "description": "Flags passed to Claude Code when restoring a saved session."
         },
-        "cc-persist.staleSignalHours": {
-          "type": "number",
-          "default": 4,
-          "description": "Hours before unattended completion, permission, and error signals are removed."
-        },
         "cc-persist.closeRogueTerminals": {
           "type": "boolean",
           "default": true,
@@ -44,27 +39,6 @@
         "command": "cc-persist.newTerminal",
         "title": "New Claude Terminal",
         "category": "cc-persist"
-      },
-      {
-        "command": "cc-persist.renameTerminal",
-        "title": "Rename Claude Terminal",
-        "category": "cc-persist"
-      },
-      {
-        "command": "cc-persist.cycleSignal",
-        "title": "Cycle to Next Signal",
-        "category": "cc-persist"
-      }
-    ],
-    "keybindings": [
-      {
-        "command": "cc-persist.renameTerminal",
-        "key": "cmd+shift+r",
-        "when": "terminalFocus"
-      },
-      {
-        "command": "cc-persist.cycleSignal",
-        "key": "cmd+ctrl+alt+m"
       }
     ]
   },

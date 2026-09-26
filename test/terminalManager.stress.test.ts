@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -6,6 +6,7 @@ import { TerminalManager, isValidSessionName } from "../src/terminalManager";
 import { _closeTerminal, TerminalExitReason, window } from "vscode";
 
 const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+const SID2 = "a4e9761c-5ddc-48aa-a592-6c2bead472e9";
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress-"));
@@ -52,7 +53,7 @@ describe("STRESS: State file with duplicate indices", () => {
 
     // Only first entry with index 0 is restored
     expect(restored).toHaveLength(1);
-    expect(tm.getSavedName(0)).toBe("session-a");
+    expect(tm.getSessionName(restored[0])).toBe("session-a");
   });
 
   it("duplicate index does not corrupt nextIndex calculation", () => {
@@ -193,7 +194,6 @@ describe("STRESS: Rapid create-then-close cycles", () => {
 
   it("terminal closed during shutdown preserves state on disk", () => {
     const t1 = tm.createTerminal("alive");
-    tm.renameTerminal(t1, "alive");
     tm.adoptWithSessionId(t1, SID);
     tm.saveState();
     tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
@@ -347,33 +347,29 @@ describe("STRESS: Concurrent saves", () => {
 
   it("two rapid saves — second overwrites first", () => {
     const t1 = tm.createTerminal("first");
-    tm.renameTerminal(t1, "first");
     tm.adoptWithSessionId(t1, SID);
     tm.saveState();
     const t2 = tm.createTerminal("second");
-    tm.renameTerminal(t2, "second");
     tm.adoptWithSessionId(t2, SID);
     tm.saveState();
 
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(2);
-    expect(state.terminals.map((t) => t.name)).toEqual(["first", "second"]);
+    expect(state.terminals.map((t) => t.index)).toEqual([0, 1]);
   });
 
   it("handleTerminalClosed triggers saveState — interleaving with manual save", () => {
     const t1 = tm.createTerminal("one");
-    tm.renameTerminal(t1, "one");
     tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("two");
-    tm.renameTerminal(t2, "two");
-    tm.adoptWithSessionId(t2, SID);
+    tm.adoptWithSessionId(t2, SID2);
 
     tm.handleTerminalClosed(t1);
     tm.saveState();
 
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(1);
-    expect(state.terminals[0].name).toBe("two");
+    expect(state.terminals[0].sessionId).toBe(SID2);
   });
 });
 
@@ -500,14 +496,6 @@ describe("STRESS: handleTerminalClosed for untracked terminal", () => {
     expect(tm.isTracked(t)).toBe(false);
     expect(() => tm.handleTerminalClosed(t)).not.toThrow();
   });
-
-  it("callback not fired for untracked terminal", () => {
-    const callback = vi.fn();
-    tm.setOnTerminalClosed(callback);
-    const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
-    tm.handleTerminalClosed(fakeTerminal);
-    expect(callback).not.toHaveBeenCalled();
-  });
 });
 
 describe("STRESS: createTerminal after restoreTerminals — index collision avoidance", () => {
@@ -543,32 +531,5 @@ describe("STRESS: createTerminal after restoreTerminals — index collision avoi
     // nextIndex should be max(0, 5, 3) + 1 = 6
     const newT = tm.createTerminal("new-session");
     expect(tm.getIndex(newT)).toBe(6);
-  });
-});
-
-describe("STRESS: Shutdown callback suppression", () => {
-  let stateDir: string;
-  let signalBaseDir: string;
-  let tm: TerminalManager;
-
-  beforeEach(() => {
-    stateDir = makeTmpDir();
-    signalBaseDir = makeTmpDir();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
-  });
-
-  afterEach(() => {
-    tm.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-  });
-
-  it("onTerminalClosed callback is NOT fired for Shutdown", () => {
-    const callback = vi.fn();
-    tm.setOnTerminalClosed(callback);
-    const t = tm.createTerminal("test");
-    tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
-    _closeTerminal(t, TerminalExitReason.Shutdown);
-    expect(callback).not.toHaveBeenCalled();
   });
 });

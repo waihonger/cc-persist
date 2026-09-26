@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { TerminalManager, isValidSessionName, isValidIndex } from "../src/terminalManager";
-import { SignalWatcher } from "../src/signalWatcher";
 import {
   window,
   _onDidChangeActiveTerminal,
@@ -15,6 +14,7 @@ import {
 } from "vscode";
 
 const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+const OTHER_SID = "a4e9761c-5ddc-48aa-a592-6c2bead472e9";
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress3-"));
@@ -86,117 +86,9 @@ describe("STRESS3: FIX VERIFIED -- MAX_SAFE_INTEGER index rejected to prevent ov
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(1);
-    expect(tm.getSavedName(5)).toBe("valid");
+    expect(tm.getSessionName(restored[0])).toBe("valid");
   });
 });
-
-// ============================================================
-// BUG 2: signalWatcher uses !isNaN instead of isValidIndex
-// Severity: HIGH (accepts negative/unsafe indices from filesystem)
-//
-// signalWatcher.scanSignals and onFile use:
-//   const index = parseInt(basename, 10); if (isNaN(index)) return;
-// But onGotoFile correctly uses isValidIndex(index).
-//
-// This means a signal file named "-1.signal" is accepted by
-// scanSignals/onFile but the same index would be rejected by
-// onGotoFile. Negative indices can pollute the signal map.
-// ============================================================
-
-describe("STRESS3: BUG -- signalWatcher accepts negative indices via scanSignals/onFile", () => {
-  let signalDir: string;
-  let stateDir: string;
-  let signalBaseDir: string;
-  let tm: TerminalManager;
-  let sw: SignalWatcher;
-
-  beforeEach(() => {
-    stateDir = makeTmpDir();
-    signalBaseDir = makeTmpDir();
-    signalDir = makeTmpDir();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-  });
-
-  afterEach(() => {
-    sw?.dispose();
-    tm?.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-    fs.rmSync(signalDir, { recursive: true, force: true });
-  });
-
-  it("negative index signal file is accepted by onFile but rejected by onGotoFile", () => {
-    // Create a signal file with negative index
-    fs.writeFileSync(path.join(signalDir, "-1.signal"), "");
-
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-
-    // Mock context
-    const fakeContext = {
-      subscriptions: { push: () => {} },
-    } as unknown as import("vscode").ExtensionContext;
-
-    // Intercept registerCommand to avoid double-registration
-    const origRegister = commands.registerCommand;
-    (commands as any).registerCommand = () => ({ dispose: () => {} });
-
-    sw.start(fakeContext);
-
-    (commands as any).registerCommand = origRegister;
-
-    // Write a goto file with negative index
-    fs.writeFileSync(path.join(signalDir, "goto"), "-1");
-    sw.markRestoreComplete();
-
-    // onGotoFile uses isValidIndex, so -1 is rejected
-    // But the -1.signal file was already accepted by scanSignals via !isNaN
-    // This is an inconsistency: the signal map has a phantom -1 entry
-    // that can never be navigated to via goto
-  });
-});
-
-// ============================================================
-// BUG 3: signalWatcher.onFile doesn't validate index with
-// isValidIndex -- accepts fractional-parsed and huge indices
-// Severity: MEDIUM (phantom entries in signal map)
-// ============================================================
-
-describe("STRESS3: BUG -- signalWatcher onFile accepts all parseInt-parseable filenames", () => {
-  let signalDir: string;
-  let stateDir: string;
-  let signalBaseDir: string;
-  let tm: TerminalManager;
-
-  beforeEach(() => {
-    stateDir = makeTmpDir();
-    signalBaseDir = makeTmpDir();
-    signalDir = makeTmpDir();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-  });
-
-  afterEach(() => {
-    tm?.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-    fs.rmSync(signalDir, { recursive: true, force: true });
-  });
-
-  it("parseInt truncates '1.5' to 1, file '1.5.signal' produces index 1 not 1.5", () => {
-    // This is technically not a bug in behavior (parseInt truncation is well-known)
-    // but it means '1.5.signal' maps to the same index as '1.signal'
-    const parsed = parseInt(path.basename("1.5.signal", ".signal"), 10);
-    expect(parsed).toBe(1); // parseInt("1.5") === 1, not NaN
-    expect(!isNaN(parsed)).toBe(true); // passes the guard
-  });
-
-  it("parseInt parses '1abc.signal' as 1, accepting garbage filenames", () => {
-    const parsed = parseInt(path.basename("1abc.signal", ".signal"), 10);
-    expect(parsed).toBe(1);
-    expect(!isNaN(parsed)).toBe(true);
-  });
-});
-
 // ============================================================
 // Names that are valid display metadata even though they resemble CLI flags.
 // ============================================================
@@ -284,8 +176,7 @@ describe("STRESS3: 5000-entry state file performance", () => {
   it("5000 terminals round-trip save-load preserves all data", () => {
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
     for (let i = 0; i < 5000; i++) {
-      const t = tm.createTerminal(`session-${i}`);
-      tm.renameTerminal(t, `session-${i}`);
+      tm.createTerminal(`session-${i}`);
       (tm as any).indexToSessionId.set(i, SID);
     }
     tm.saveState();
@@ -323,11 +214,9 @@ describe("STRESS3: Periodic save timer interleaving with handleTerminalClosed", 
 
   it("saveState immediately after handleTerminalClosed does not re-add closed terminal", () => {
     const t1 = tm.createTerminal("alive");
-    tm.renameTerminal(t1, "alive");
     tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("dying");
-    tm.renameTerminal(t2, "dying");
-    tm.adoptWithSessionId(t2, SID);
+    tm.adoptWithSessionId(t2, OTHER_SID);
 
     // handleTerminalClosed removes from maps AND saves
     tm.handleTerminalClosed(t2);
@@ -337,16 +226,14 @@ describe("STRESS3: Periodic save timer interleaving with handleTerminalClosed", 
 
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(1);
-    expect(state.terminals[0].name).toBe("alive");
+    expect(state.terminals[0].sessionId).toBe(SID);
   });
 
   it("user-close saves state with closed terminal removed", () => {
     const t1 = tm.createTerminal("stays");
-    tm.renameTerminal(t1, "stays");
     tm.adoptWithSessionId(t1, SID);
     const t2 = tm.createTerminal("will-close");
-    tm.renameTerminal(t2, "will-close");
-    tm.adoptWithSessionId(t2, SID);
+    tm.adoptWithSessionId(t2, OTHER_SID);
     tm.saveState();
     expect(tm.loadState().terminals).toHaveLength(2);
 
@@ -356,271 +243,9 @@ describe("STRESS3: Periodic save timer interleaving with handleTerminalClosed", 
     // State on disk updated — user close saves
     const after = tm.loadState();
     expect(after.terminals).toHaveLength(1);
-    expect(after.terminals[0].name).toBe("stays");
+    expect(after.terminals[0].sessionId).toBe(SID);
   });
 });
-
-// ============================================================
-// SignalWatcher: First-ever test coverage
-// ============================================================
-
-describe("STRESS3: SignalWatcher -- basic signal lifecycle", () => {
-  let signalDir: string;
-  let stateDir: string;
-  let signalBaseDir: string;
-  let tm: TerminalManager;
-  let sw: SignalWatcher;
-
-  function makeFakeContext() {
-    const subs: any[] = [];
-    return {
-      subscriptions: subs,
-    } as unknown as import("vscode").ExtensionContext;
-  }
-
-  beforeEach(() => {
-    stateDir = makeTmpDir();
-    signalBaseDir = makeTmpDir();
-    signalDir = makeTmpDir();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-  });
-
-  afterEach(() => {
-    sw?.dispose();
-    tm?.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-    fs.rmSync(signalDir, { recursive: true, force: true });
-  });
-
-  it("creates status bar item on construction", () => {
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    // No crash -- status bar item was created
-  });
-
-  it("dispose stops watcher and timer without crash", () => {
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    // dispose before start -- should not crash
-    expect(() => sw.dispose()).not.toThrow();
-  });
-
-  it("start creates signalDir if missing", () => {
-    const newDir = path.join(os.tmpdir(), `cc-persist-sigtest-${Date.now()}`);
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(newDir, tm, spyLog);
-
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-
-    expect(fs.existsSync(newDir)).toBe(true);
-    fs.rmSync(newDir, { recursive: true, force: true });
-  });
-
-  it("scanSignals picks up signal file created before start", () => {
-    // Create signal file before starting watcher
-    fs.writeFileSync(path.join(signalDir, "0.signal"), "");
-
-    const { spyLog, lines } = makeLog();
-
-    // Unfocus window so signal is not auto-cleared
-    (window as any).state = { focused: false };
-
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-
-    (window as any).state = { focused: true };
-
-    // scanSignals runs during start(), which calls onFile for 0.signal
-    // Check log for signal detection
-    const signalLine = lines.find((l: string) => l.includes("Signal received"));
-    expect(signalLine).toBeDefined();
-  });
-
-  it("onTerminalClosed clears signals for that index", () => {
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-
-    // Create signal file
-    fs.writeFileSync(path.join(signalDir, "0.signal"), "");
-    fs.writeFileSync(path.join(signalDir, "0.permission"), "");
-
-    const ctx = makeFakeContext();
-
-    // Unfocus so signals aren't auto-cleared
-    (window as any).state = { focused: false };
-    sw.start(ctx);
-    (window as any).state = { focused: true };
-
-    // Close terminal should clean up signal files
-    sw.onTerminalClosed(0);
-
-    // Signal files should be deleted
-    expect(fs.existsSync(path.join(signalDir, "0.signal"))).toBe(false);
-    expect(fs.existsSync(path.join(signalDir, "0.permission"))).toBe(false);
-  });
-
-  it("stale signals are pruned based on STALE_THRESHOLD_MS", () => {
-    // Create a signal file with old mtime
-    const signalPath = path.join(signalDir, "0.signal");
-    fs.writeFileSync(signalPath, "");
-
-    // Set mtime to 5 hours ago (default stale threshold is 4 hours)
-    const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
-    fs.utimesSync(signalPath, fiveHoursAgo, fiveHoursAgo);
-
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-
-    (window as any).state = { focused: false };
-    sw.start(ctx);
-    (window as any).state = { focused: true };
-
-    // Stale signal should be deleted by onFile
-    expect(fs.existsSync(signalPath)).toBe(false);
-  });
-
-  it("markRestoreComplete processes pending goto file", () => {
-    const t0 = tm.createTerminal("target");
-    const showSpy = vi.spyOn(t0, "show");
-
-    // Write goto before restore is complete
-    fs.writeFileSync(path.join(signalDir, "goto"), "0");
-
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-
-    // goto should not be processed yet (restoreComplete = false)
-    expect(showSpy).not.toHaveBeenCalled();
-
-    // Mark restore complete -- should now process the goto
-    sw.markRestoreComplete();
-    expect(showSpy).toHaveBeenCalled();
-  });
-
-  it("deleteSignalFile removes all signal types for an index", () => {
-    fs.writeFileSync(path.join(signalDir, "5.signal"), "");
-    fs.writeFileSync(path.join(signalDir, "5.permission"), "");
-    fs.writeFileSync(path.join(signalDir, "5.error"), "");
-
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    sw.deleteSignalFile(5);
-
-    expect(fs.existsSync(path.join(signalDir, "5.signal"))).toBe(false);
-    expect(fs.existsSync(path.join(signalDir, "5.permission"))).toBe(false);
-    expect(fs.existsSync(path.join(signalDir, "5.error"))).toBe(false);
-  });
-});
-
-describe("STRESS3: SignalWatcher -- goto file edge cases", () => {
-  let signalDir: string;
-  let stateDir: string;
-  let signalBaseDir: string;
-  let tm: TerminalManager;
-  let sw: SignalWatcher;
-
-  function makeFakeContext() {
-    return {
-      subscriptions: [] as any[],
-    } as unknown as import("vscode").ExtensionContext;
-  }
-
-  beforeEach(() => {
-    stateDir = makeTmpDir();
-    signalBaseDir = makeTmpDir();
-    signalDir = makeTmpDir();
-    tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog().channel);
-  });
-
-  afterEach(() => {
-    sw?.dispose();
-    tm?.disposeAll();
-    fs.rmSync(stateDir, { recursive: true, force: true });
-    fs.rmSync(signalBaseDir, { recursive: true, force: true });
-    fs.rmSync(signalDir, { recursive: true, force: true });
-  });
-
-  it("goto file with non-numeric content is ignored", () => {
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-    sw.markRestoreComplete();
-
-    fs.writeFileSync(path.join(signalDir, "goto"), "not-a-number");
-    // Trigger manual processing
-    sw.markRestoreComplete(); // second call is fine, just sets flag and checks
-    // No crash expected
-  });
-
-  it("goto file with negative index is rejected by isValidIndex", () => {
-    const { spyLog, lines } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-    sw.markRestoreComplete();
-
-    fs.writeFileSync(path.join(signalDir, "goto"), "-1");
-    sw.markRestoreComplete();
-
-    // -1 should be rejected by isValidIndex
-    const gotoLine = lines.find((l: string) => l.includes("Goto request"));
-    expect(gotoLine).toBeUndefined();
-  });
-
-  it("goto file with fractional index is truncated by parseInt and accepted", () => {
-    const { spyLog, lines } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-    sw.markRestoreComplete();
-
-    // parseInt("1.5", 10) === 1, which IS valid -- so this actually passes
-    // isValidIndex check and shows terminal 1 (if it exists)
-    fs.writeFileSync(path.join(signalDir, "goto"), "1.5");
-    sw.markRestoreComplete();
-
-    // parseInt("1.5") = 1, and isValidIndex(1) = true
-    // So goto request IS logged for terminal 1
-    const gotoLine = lines.find((l: string) => l.includes("Goto request for terminal 1"));
-    expect(gotoLine).toBeDefined(); // Not a bug per se, but shows parseInt truncation
-  });
-
-  it("goto file with empty content does not crash", () => {
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-    sw.markRestoreComplete();
-
-    fs.writeFileSync(path.join(signalDir, "goto"), "");
-    expect(() => sw.markRestoreComplete()).not.toThrow();
-  });
-
-  it("goto file with whitespace-padded number is handled", () => {
-    const t0 = tm.createTerminal("target");
-    const showSpy = vi.spyOn(t0, "show");
-
-    const { spyLog } = makeLog();
-    sw = new SignalWatcher(signalDir, tm, spyLog);
-    const ctx = makeFakeContext();
-    sw.start(ctx);
-    sw.markRestoreComplete();
-
-    fs.writeFileSync(path.join(signalDir, "goto"), "  0  \n");
-    sw.markRestoreComplete();
-
-    // .trim() + parseInt should handle whitespace
-    expect(showSpy).toHaveBeenCalled();
-  });
-});
-
 // ============================================================
 // ATTACK: disposeAll then saveState -- what gets written?
 // ============================================================
@@ -644,7 +269,6 @@ describe("STRESS3: disposeAll then saveState writes empty state", () => {
 
   it("saveState after disposeAll writes current (empty) map to disk", () => {
     const t = tm.createTerminal("important-session");
-    tm.renameTerminal(t, "important-session");
     tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
@@ -685,7 +309,6 @@ describe("STRESS3: Shutdown close then disposeAll sequence", () => {
 
   it("disposeAll after a shutdown close preserves the last saved state", () => {
     const t = tm.createTerminal("preserved");
-    tm.renameTerminal(t, "preserved");
     tm.adoptWithSessionId(t, SID);
     tm.saveState();
     tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
@@ -699,12 +322,11 @@ describe("STRESS3: Shutdown close then disposeAll sequence", () => {
 
     state = tm.loadState();
     expect(state.terminals).toHaveLength(1);
-    expect(state.terminals[0].name).toBe("preserved");
+    expect(state.terminals[0].sessionId).toBe(SID);
   });
 
   it("shutdown close preserves state on disk through dispose sequence", () => {
     const t = tm.createTerminal("test");
-    tm.renameTerminal(t, "test");
     tm.adoptWithSessionId(t, SID);
     tm.saveState();
     tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
@@ -820,11 +442,8 @@ describe("STRESS3: Two TerminalManager instances reading same state file", () =>
     expect(r2).toHaveLength(1);
 
     // Both have index 0, but they're separate terminal objects
-    // This means two terminals with same DTACH_SOCKET_INDEX
-    const opts1 = (r1[0] as any).creationOptions;
-    const opts2 = (r2[0] as any).creationOptions;
-    expect(opts1.env.DTACH_SOCKET_INDEX).toBe("0");
-    expect(opts2.env.DTACH_SOCKET_INDEX).toBe("0");
+    expect(tm1.getIndex(r1[0])).toBe(0);
+    expect(tm2.getIndex(r2[0])).toBe(0);
 
     tm1.disposeAll();
     tm2.disposeAll();
@@ -832,10 +451,10 @@ describe("STRESS3: Two TerminalManager instances reading same state file", () =>
 });
 
 // ============================================================
-// ATTACK: showFirst and showTerminal on empty/invalid state
+// ATTACK: showFirst on empty/invalid state
 // ============================================================
 
-describe("STRESS3: showFirst and showTerminal on empty/invalid state", () => {
+describe("STRESS3: showFirst on empty/invalid state", () => {
   let stateDir: string;
   let signalBaseDir: string;
   let tm: TerminalManager;
@@ -854,14 +473,6 @@ describe("STRESS3: showFirst and showTerminal on empty/invalid state", () => {
 
   it("showFirst on empty manager does not crash", () => {
     expect(() => tm.showFirst()).not.toThrow();
-  });
-
-  it("showTerminal with non-existent index does not crash", () => {
-    expect(() => tm.showTerminal(999)).not.toThrow();
-  });
-
-  it("getSavedName with non-existent index returns undefined", () => {
-    expect(tm.getSavedName(999)).toBeUndefined();
   });
 
   it("getIndex for untracked terminal returns undefined", () => {

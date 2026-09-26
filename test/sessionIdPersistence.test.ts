@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { SignalWatcher } from "../src/signalWatcher";
+import { SidWatcher } from "../src/sidWatcher";
 import { parseSidPayload, TerminalManager } from "../src/terminalManager";
 import { window } from "vscode";
 
@@ -193,7 +193,7 @@ describe("session ID persistence", () => {
   });
 });
 
-describe("SignalWatcher session IDs", () => {
+describe("SidWatcher session IDs", () => {
   async function flushPidLane(): Promise<void> {
     for (let index = 0; index < 10; index++) await Promise.resolve();
   }
@@ -206,25 +206,13 @@ describe("SignalWatcher session IDs", () => {
     const log = makeLog();
     const pidCallback = vi.fn(async () => "adopted" as const);
     const snapshot = vi.fn(async () => new Map());
-    const show = vi.fn();
-    const originalCreateStatusBarItem = window.createStatusBarItem;
-    (window as any).createStatusBarItem = () => ({
-      text: "",
-      tooltip: "",
-      command: "",
-      backgroundColor: undefined,
-      show,
-      hide: vi.fn(),
-      dispose: vi.fn(),
-    });
-    const watcher = new SignalWatcher(signalDir, tm, log.channel, 4, pidCallback, snapshot);
+    const watcher = new SidWatcher(signalDir, log.channel, pidCallback, snapshot);
     const context = { subscriptions: [] } as unknown as import("vscode").ExtensionContext;
     return {
-      signalDir, pidCallback, snapshot, show, watcher, context, lines: log.lines,
+      signalDir, pidCallback, snapshot, watcher, context, lines: log.lines,
       cleanup: () => {
         watcher.dispose();
         tm.disposeAll();
-        (window as any).createStatusBarItem = originalCreateStatusBarItem;
         fs.rmSync(stateDir, { recursive: true, force: true });
         fs.rmSync(signalBaseDir, { recursive: true, force: true });
         fs.rmSync(signalDir, { recursive: true, force: true });
@@ -237,7 +225,7 @@ describe("SignalWatcher session IDs", () => {
     const sidPath = path.join(f.signalDir, "pid-4321.sid");
     fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
 
-    f.watcher.start(f.context);
+    f.watcher.start();
     f.watcher.markRestoreComplete();
     await flushPidLane();
 
@@ -321,7 +309,7 @@ describe("SignalWatcher session IDs", () => {
     const f = makeWatcherFixture();
     fs.writeFileSync(path.join(f.signalDir, "pid-abc.sid"), JSON.stringify({ sessionId: SID }));
 
-    f.watcher.start(f.context);
+    f.watcher.start();
     f.watcher.markRestoreComplete();
     await flushPidLane();
 
@@ -339,7 +327,7 @@ describe("SignalWatcher session IDs", () => {
     const sidPath = path.join(f.signalDir, "pid-4321.sid");
     fs.writeFileSync(sidPath, JSON.stringify({ sessionId: SID }));
 
-    f.watcher.start(f.context);
+    f.watcher.start();
     f.watcher.markRestoreComplete();
     expect(f.pidCallback).toHaveBeenCalledTimes(1);
 

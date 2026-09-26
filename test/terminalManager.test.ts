@@ -45,7 +45,7 @@ describe("TerminalManager", () => {
 
     it("writes parseable state atomically without leaving a temp file", () => {
       const terminal = tm.createTerminal();
-      tm.renameTerminal(terminal, "atomic");
+      tm.adoptWithSessionId(terminal, SID);
 
       expect(tm.saveState()).toBe(true);
       expect(() => JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"))).not.toThrow();
@@ -58,17 +58,6 @@ describe("TerminalManager", () => {
       tm.saveState();
       const state = tm.loadState();
       expect(state.terminals).toHaveLength(0);
-    });
-
-    it("writes a renamed terminal without a session ID only to names.json", () => {
-      const t1 = tm.createTerminal();
-      tm.renameTerminal(t1, "warroom");
-      tm.saveState();
-
-      expect(tm.loadState().terminals).toEqual([]);
-      expect(JSON.parse(fs.readFileSync(path.join(signalBaseDir, "names.json"), "utf8"))).toEqual({
-        "0": "warroom",
-      });
     });
 
     it("returns empty state when file missing", () => {
@@ -100,7 +89,6 @@ describe("TerminalManager", () => {
       const t = tm.createTerminal();
       const opts = (t as any).creationOptions;
       expect(opts.env.DTACH_SIGNAL_DIR).toBeDefined();
-      expect(opts.env.DTACH_SOCKET_INDEX).toBe("0");
     });
 
     it("does not set name on created terminal (Claude owns the title)", () => {
@@ -134,18 +122,6 @@ describe("TerminalManager", () => {
       expect(tm.isTracked(t)).toBe(true);
     });
 
-    it("shows terminal by index", () => {
-      const t = tm.createTerminal("test");
-      const showSpy = vi.spyOn(t, "show");
-      tm.showTerminal(0);
-      expect(showSpy).toHaveBeenCalled();
-    });
-
-    it("getSavedName returns name for renamed terminal", () => {
-      const t = tm.createTerminal();
-      tm.renameTerminal(t, "warroom");
-      expect(tm.getSavedName(0)).toBe("warroom");
-    });
   });
 
   describe("PID-lane adoption", () => {
@@ -187,12 +163,14 @@ describe("TerminalManager", () => {
     });
 
     it("saves state on user-initiated close", () => {
-      const t1 = tm.createTerminal();
-      const t2 = tm.createTerminal();
-      tm.renameTerminal(t1, "first");
-      tm.renameTerminal(t2, "second");
-      tm.adoptWithSessionId(t1, SID);
-      tm.adoptWithSessionId(t2, OTHER_SID);
+      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({
+        version: 2,
+        terminals: [
+          { index: 0, sessionId: SID, name: "first" },
+          { index: 1, sessionId: OTHER_SID, name: "second" },
+        ],
+      }));
+      const [t1] = tm.restoreTerminals();
       tm.saveState();
       // exitStatus.reason = User (default in mock)
       tm.handleTerminalClosed(t1);
@@ -201,26 +179,15 @@ describe("TerminalManager", () => {
       expect(state.terminals[0].name).toBe("second");
     });
 
-    it("fires onTerminalClosed callback", () => {
-      const callback = vi.fn();
-      tm.setOnTerminalClosed(callback);
-      const t = tm.createTerminal("test");
-      tm.handleTerminalClosed(t);
-      expect(callback).toHaveBeenCalledWith(0);
-    });
-
     it.each([
       ["Shutdown", TerminalExitReason.Shutdown],
       ["Process", TerminalExitReason.Process],
       ["Unknown", TerminalExitReason.Unknown],
       ["Extension", TerminalExitReason.Extension],
       ["undefined exitStatus", undefined],
-    ])("preserves byte-identical state and skips callbacks for %s", (_label, reason) => {
-      const callback = vi.fn();
-      tm.setOnTerminalClosed(callback);
+    ])("preserves byte-identical state for %s", (_label, reason) => {
       tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
       const t = tm.createTerminal();
-      tm.renameTerminal(t, "test");
       tm.adoptWithSessionId(t, SID);
       tm.saveState();
       const before = fs.readFileSync(path.join(stateDir, "state.json"));
@@ -233,23 +200,18 @@ describe("TerminalManager", () => {
       }
 
       expect(tm.isTracked(t)).toBe(true);
-      expect(callback).not.toHaveBeenCalled();
       expect(fs.readFileSync(path.join(stateDir, "state.json"))).toEqual(before);
     });
 
     it("prunes and saves for close reason User", () => {
-      const callback = vi.fn();
-      tm.setOnTerminalClosed(callback);
       tm.registerEventHandlers({ subscriptions: [] } as unknown as import("vscode").ExtensionContext);
       const t = tm.createTerminal();
-      tm.renameTerminal(t, "test");
       tm.adoptWithSessionId(t, SID);
       tm.saveState();
 
       _closeTerminal(t, TerminalExitReason.User);
 
       expect(tm.isTracked(t)).toBe(false);
-      expect(callback).toHaveBeenCalledWith(0);
       expect(tm.loadState().terminals).toEqual([]);
     });
   });
@@ -326,28 +288,25 @@ describe("TerminalManager", () => {
 
   describe("restore", () => {
     it("creates terminals from saved state", () => {
-      const t1 = tm.createTerminal();
-      const t2 = tm.createTerminal();
-      tm.renameTerminal(t1, "warroom");
-      tm.renameTerminal(t2, "alan");
-      tm.adoptWithSessionId(t1, SID);
-      tm.adoptWithSessionId(t2, OTHER_SID);
-      tm.saveState();
-      tm.disposeAll();
+      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({
+        version: 2,
+        terminals: [
+          { index: 0, sessionId: SID, name: "warroom" },
+          { index: 1, sessionId: OTHER_SID, name: "alan" },
+        ],
+      }));
 
-      // New manager restores
       const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
       const terminals = tm2.restoreTerminals();
       expect(terminals).toHaveLength(2);
       for (const t of terminals) expect((t as any).creationOptions.iconPath).toEqual({ id: "none" });
-      expect(tm2.getSavedName(0)).toBe("warroom");
-      expect(tm2.getSavedName(1)).toBe("alan");
+      expect(tm2.getSessionName(terminals[0])).toBe("warroom");
+      expect(tm2.getSessionName(terminals[1])).toBe("alan");
       tm2.disposeAll();
     });
 
     it("bakes the claude --resume command into zsh shellArgs", () => {
       const t = tm.createTerminal();
-      tm.renameTerminal(t, "warroom");
       tm.adoptWithSessionId(t, SID);
       tm.saveState();
       tm.disposeAll();
@@ -366,8 +325,6 @@ describe("TerminalManager", () => {
     it("preserves indices on restore", () => {
       const t1 = tm.createTerminal();
       const t2 = tm.createTerminal();
-      tm.renameTerminal(t1, "warroom");
-      tm.renameTerminal(t2, "alan");
       tm.adoptWithSessionId(t1, SID);
       tm.adoptWithSessionId(t2, OTHER_SID);
       tm.saveState();
@@ -387,16 +344,12 @@ describe("TerminalManager", () => {
   });
 
   describe("rename", () => {
-    it("renameTerminal stores session name", () => {
-      const t = tm.createTerminal("Terminal 1");
-      tm.renameTerminal(t, "warroom");
-      expect(tm.getSessionName(t)).toBe("warroom");
-    });
-
     it("saveState uses stored session name over terminal.name", () => {
-      const t = tm.createTerminal("Terminal 1");
-      tm.renameTerminal(t, "warroom");
-      tm.adoptWithSessionId(t, SID);
+      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({
+        version: 2,
+        terminals: [{ index: 0, sessionId: SID, name: "warroom" }],
+      }));
+      tm.restoreTerminals();
       tm.saveState();
       const state = tm.loadState();
       expect(state.terminals[0].name).toBe("warroom");
@@ -409,122 +362,21 @@ describe("TerminalManager", () => {
       expect(state.terminals).toHaveLength(0);
     });
 
-    it("renameTerminal rejects invalid names", () => {
-      const t = tm.createTerminal("Terminal 1");
-      const result = tm.renameTerminal(t, "'; rm -rf /");
-      expect(result).toBe(null);
-      expect(tm.getSessionName(t)).toBeUndefined();
-    });
-
-    it("renameTerminal adopts untracked terminal", () => {
-      const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
-      const result = tm.renameTerminal(fakeTerminal, "warroom");
-      expect(result).toBe("warroom");
-      expect(tm.isTracked(fakeTerminal)).toBe(true);
-      expect(tm.getSessionName(fakeTerminal)).toBe("warroom");
-      expect(tm.getIndex(fakeTerminal)).toBeDefined();
-    });
-
-    it("renameTerminal returns base name when unique", () => {
-      const t = tm.createTerminal("Terminal 1");
-      expect(tm.renameTerminal(t, "warroom")).toBe("warroom");
-    });
-
-    it("renameTerminal appends -2 on collision", () => {
-      const t1 = tm.createTerminal("Terminal 1");
-      const t2 = tm.createTerminal("Terminal 2");
-      tm.renameTerminal(t1, "warroom");
-      expect(tm.renameTerminal(t2, "warroom")).toBe("warroom-2");
-      expect(tm.getSessionName(t2)).toBe("warroom-2");
-    });
-
-    it("renameTerminal increments counter past existing suffixes", () => {
-      const t1 = tm.createTerminal("Terminal 1");
-      const t2 = tm.createTerminal("Terminal 2");
-      const t3 = tm.createTerminal("Terminal 3");
-      tm.renameTerminal(t1, "warroom");
-      tm.renameTerminal(t2, "warroom");
-      expect(tm.renameTerminal(t3, "warroom")).toBe("warroom-3");
-    });
-
-    it("renameTerminal to same name on same terminal is no-op", () => {
-      const t = tm.createTerminal("Terminal 1");
-      tm.renameTerminal(t, "warroom");
-      expect(tm.renameTerminal(t, "warroom")).toBe("warroom");
-    });
-
-    it("renameTerminal fills counter gap", () => {
-      const t1 = tm.createTerminal("Terminal 1");
-      const t2 = tm.createTerminal("Terminal 2");
-      const t3 = tm.createTerminal("Terminal 3");
-      tm.renameTerminal(t1, "warroom");
-      tm.renameTerminal(t2, "warroom-3");
-      expect(tm.renameTerminal(t3, "warroom")).toBe("warroom-2");
-    });
-
-    it("renameTerminal treats explicit suffixed base as its own name", () => {
-      const t1 = tm.createTerminal("Terminal 1");
-      const t2 = tm.createTerminal("Terminal 2");
-      tm.renameTerminal(t1, "warroom-2");
-      expect(tm.renameTerminal(t2, "warroom-2")).toBe("warroom-2-2");
-    });
-
-    it("getSavedName returns collision-resolved name", () => {
-      const t1 = tm.createTerminal("Terminal 1");
-      const t2 = tm.createTerminal("Terminal 2");
-      tm.renameTerminal(t1, "warroom");
-      tm.renameTerminal(t2, "warroom");
-      const idx2 = tm.getIndex(t2)!;
-      expect(tm.getSavedName(idx2)).toBe("warroom-2");
-    });
-
-    it("renameTerminal truncates base to keep resolved name within 64-char limit", () => {
-      const t1 = tm.createTerminal("Terminal 1");
-      const t2 = tm.createTerminal("Terminal 2");
-      const longBase = "a".repeat(64);
-      tm.renameTerminal(t1, longBase);
-      const resolved = tm.renameTerminal(t2, longBase);
-      expect(resolved).not.toBeNull();
-      expect(resolved!.length).toBeLessThanOrEqual(64);
-      expect(resolved).toMatch(/-2$/);
-    });
-
-    it("captured adopted terminal appears in saveState", () => {
-      const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
-      tm.renameTerminal(fakeTerminal, "warroom");
-      tm.adoptWithSessionId(fakeTerminal, SID);
-      tm.saveState();
-      const state = tm.loadState();
-      expect(state.terminals).toHaveLength(1);
-      expect(state.terminals[0].name).toBe("warroom");
-    });
-
-    it("renameTerminal still rejects invalid names on untracked terminal", () => {
-      const fakeTerminal = window.createTerminal({ name: "untracked" }) as any;
-      const result = tm.renameTerminal(fakeTerminal, "'; rm -rf /");
-      expect(result).toBe(null);
-      expect(tm.isTracked(fakeTerminal)).toBe(false);
-    });
-
     it("restore populates session name map", () => {
-      tm.createTerminal("warroom");
-      tm.renameTerminal(
-        [...(tm as any).terminalToIndex.keys()][0],
-        "warroom",
-      );
-      tm.adoptWithSessionId([...(tm as any).terminalToIndex.keys()][0], SID);
-      tm.saveState();
-      tm.disposeAll();
-
-      const tm2 = new TerminalManager(stateDir, signalBaseDir, startDir, makeLog());
-      const terminals = tm2.restoreTerminals();
-      expect(tm2.getSessionName(terminals[0])).toBe("warroom");
-      tm2.disposeAll();
+      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({
+        version: 2,
+        terminals: [{ index: 0, sessionId: SID, name: "warroom" }],
+      }));
+      const terminals = tm.restoreTerminals();
+      expect(tm.getSessionName(terminals[0])).toBe("warroom");
     });
 
     it("handleTerminalClosed cleans up session name", () => {
-      const t = tm.createTerminal("Terminal 1");
-      tm.renameTerminal(t, "warroom");
+      fs.writeFileSync(path.join(stateDir, "state.json"), JSON.stringify({
+        version: 2,
+        terminals: [{ index: 0, sessionId: SID, name: "warroom" }],
+      }));
+      const [t] = tm.restoreTerminals();
       tm.handleTerminalClosed(t);
       expect(tm.getSessionName(t)).toBeUndefined();
     });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -6,6 +6,7 @@ import { TerminalManager, isValidSessionName } from "../src/terminalManager";
 import { _closeTerminal, TerminalExitReason, window } from "vscode";
 
 const SID = "3fb057dc-8ed3-4b41-b3eb-8dde3fb1e02c";
+const OTHER_SID = "a4e9761c-5ddc-48aa-a592-6c2bead472e9";
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-stress2-"));
@@ -187,7 +188,7 @@ describe("STRESS2: Verify fix -- duplicate indices deduplicated, first wins", ()
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(1);
-    expect(tm.getSavedName(3)).toBe("first");
+    expect(tm.getSessionName(restored[0])).toBe("first");
   });
 
   it("mixed duplicate and unique indices -- unique all restored", () => {
@@ -204,7 +205,7 @@ describe("STRESS2: Verify fix -- duplicate indices deduplicated, first wins", ()
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const restored = tm.restoreTerminals();
     expect(restored).toHaveLength(3);
-    expect([0, 1, 2].map((i) => tm.getSavedName(i))).toEqual(["a", "b", "c"]);
+    expect(restored.map((t) => tm.getSessionName(t))).toEqual(["a", "b", "c"]);
   });
 });
 
@@ -421,8 +422,7 @@ describe("STRESS2: NEW -- extremely long terminal list (1000 entries)", () => {
   it("save and load 1000 terminals completes without error", () => {
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     for (let i = 0; i < 1000; i++) {
-      const t = tm.createTerminal(`session-${i}`);
-      tm.renameTerminal(t, `session-${i}`);
+      tm.createTerminal(`session-${i}`);
       (tm as any).indexToSessionId.set(i, SID);
     }
     const start = performance.now();
@@ -581,14 +581,13 @@ describe("STRESS2: NEW -- createTerminal after many create/close cycles: index b
     tm.restoreTerminals();
 
     const t = tm.createTerminal("higher");
-    tm.renameTerminal(t, "higher");
-    tm.adoptWithSessionId(t, SID);
+    tm.adoptWithSessionId(t, OTHER_SID);
     tm.saveState();
 
     const tm2 = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const state = tm2.loadState();
     expect(state.terminals).toHaveLength(2);
-    expect(state.terminals.find((t) => t.name === "higher")).toBeDefined();
+    expect(state.terminals.find((t) => t.sessionId === OTHER_SID)).toBeDefined();
     tm2.disposeAll();
   });
 });
@@ -657,8 +656,8 @@ describe("STRESS2: BUG -- disposeAll does NOT reset restored flag", () => {
 
     expect(tm.isTracked(t1)).toBe(false);
     expect(tm.isTracked(t2)).toBe(false);
-    expect(tm.getSavedName(0)).toBeUndefined();
-    expect(tm.getSavedName(1)).toBeUndefined();
+    expect(tm.getSessionName(t1)).toBeUndefined();
+    expect(tm.getSessionName(t2)).toBeUndefined();
   });
 });
 
@@ -702,7 +701,6 @@ describe("STRESS2: BUG -- nextIndex not reset by disposeAll", () => {
   it("disposeAll + restore correctly re-establishes nextIndex from state", () => {
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const t = tm.createTerminal("first");
-    tm.renameTerminal(t, "first");
     tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
@@ -766,7 +764,6 @@ describe("STRESS2: NEW -- state.json is a symlink", () => {
 
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     const t = tm.createTerminal("via-symlink");
-    tm.renameTerminal(t, "via-symlink");
     tm.adoptWithSessionId(t, SID);
     tm.saveState();
 
@@ -774,7 +771,7 @@ describe("STRESS2: NEW -- state.json is a symlink", () => {
     expect(JSON.parse(fs.readFileSync(realPath, "utf8")).terminals).toHaveLength(0);
     const saved = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
     expect(saved.terminals).toHaveLength(1);
-    expect(saved.terminals[0].name).toBe("via-symlink");
+    expect(saved.terminals[0].sessionId).toBe(SID);
 
     fs.rmSync(realDir, { recursive: true, force: true });
   });
@@ -874,7 +871,6 @@ describe("STRESS2: NEW -- concurrent save during handleTerminalClosed", () => {
   it("rapid close of all terminals during shutdown preserves state", () => {
     const terminals = Array.from({ length: 20 }, (_, i) => {
       const t = tm.createTerminal(`t-${i}`);
-      tm.renameTerminal(t, `t-${i}`);
       tm.adoptWithSessionId(t, SID);
       return t;
     });
@@ -888,25 +884,25 @@ describe("STRESS2: NEW -- concurrent save during handleTerminalClosed", () => {
   });
 
   it("interleaved create and close results in consistent state", () => {
+    const SID_A = "11111111-1111-4111-8111-111111111111";
+    const SID_B = "22222222-2222-4222-8222-222222222222";
+    const SID_C = "33333333-3333-4333-8333-333333333333";
+    const SID_D = "44444444-4444-4444-8444-444444444444";
     const t1 = tm.createTerminal("one");
-    tm.renameTerminal(t1, "one");
-    tm.adoptWithSessionId(t1, SID);
+    tm.adoptWithSessionId(t1, SID_A);
     const t2 = tm.createTerminal("two");
-    tm.renameTerminal(t2, "two");
-    tm.adoptWithSessionId(t2, SID);
+    tm.adoptWithSessionId(t2, SID_B);
     tm.handleTerminalClosed(t1);
     const t3 = tm.createTerminal("three");
-    tm.renameTerminal(t3, "three");
-    tm.adoptWithSessionId(t3, SID);
+    tm.adoptWithSessionId(t3, SID_C);
     tm.handleTerminalClosed(t2);
     const t4 = tm.createTerminal("four");
-    tm.renameTerminal(t4, "four");
-    tm.adoptWithSessionId(t4, SID);
+    tm.adoptWithSessionId(t4, SID_D);
 
     tm.saveState();
     const state = tm.loadState();
     expect(state.terminals).toHaveLength(2);
-    expect(state.terminals.map((t) => t.name)).toEqual(["three", "four"]);
+    expect(state.terminals.map((t) => t.sessionId)).toEqual([SID_C, SID_D]);
   });
 });
 

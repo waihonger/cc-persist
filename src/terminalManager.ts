@@ -86,7 +86,6 @@ export class TerminalManager {
   private readonly shellPath: string | undefined;
   private nextIndex = 0;
   private restored = false;
-  private onTerminalClosedCallback: ((index: number) => void) | undefined;
 
   constructor(
     stateDir: string,
@@ -201,7 +200,6 @@ export class TerminalManager {
     const terminal = vscode.window.createTerminal({
       env: {
         DTACH_SIGNAL_DIR: this.sigDir,
-        DTACH_SOCKET_INDEX: index.toString(),
       },
       cwd: this.startDir,
       isTransient: true,
@@ -255,7 +253,6 @@ export class TerminalManager {
         } : {}),
         env: {
           DTACH_SIGNAL_DIR: this.sigDir,
-          DTACH_SOCKET_INDEX: info.index.toString(),
         },
         cwd,
         isTransient: true,
@@ -291,7 +288,6 @@ export class TerminalManager {
       return;
     }
 
-    this.onTerminalClosedCallback?.(index);
     this.terminalToIndex.delete(terminal);
     this.indexToTerminal.delete(index);
     this.indexToSessionId.delete(index);
@@ -327,12 +323,6 @@ export class TerminalManager {
     return this.terminalToIndex.get(terminal);
   }
 
-  getSavedName(index: number): string | undefined {
-    const terminal = this.indexToTerminal.get(index);
-    if (!terminal) return undefined;
-    return this.sessionNames.get(terminal) ?? terminal.name;
-  }
-
   /** Adopt a terminal cc-persist didn't create and persist its session ID.
    *  Returns true only when accepted AND persisted. */
   adoptWithSessionId(terminal: vscode.Terminal, sid: string, cwd?: string): boolean {
@@ -344,33 +334,6 @@ export class TerminalManager {
     this.indexToSessionId.set(index, sid);
     this.setCwd(index, cwd);
     return this.saveState();
-  }
-
-  renameTerminal(terminal: vscode.Terminal, name: string): string | null {
-    if (!isValidSessionName(name)) return null;
-    if (!this.terminalToIndex.has(terminal)) {
-      this.adoptTerminal(terminal);
-    }
-    this.sessionNames.delete(terminal);
-    const unique = this.resolveUniqueName(name);
-    this.sessionNames.set(terminal, unique);
-    const index = this.terminalToIndex.get(terminal);
-    this.log.appendLine(`Renamed terminal ${index}: ${unique}`);
-    return unique;
-  }
-
-  private resolveUniqueName(base: string): string {
-    const MAX = 64;
-    const taken = new Set(this.sessionNames.values());
-    if (!taken.has(base)) return base;
-    let n = 2;
-    while (true) {
-      const suffix = `-${n}`;
-      const truncated = base.length + suffix.length > MAX ? base.slice(0, MAX - suffix.length) : base;
-      const candidate = `${truncated}${suffix}`;
-      if (!taken.has(candidate)) return candidate;
-      n++;
-    }
   }
 
   private adoptTerminal(terminal: vscode.Terminal): number {
@@ -393,18 +356,9 @@ export class TerminalManager {
     return this.sessionNames.get(terminal);
   }
 
-  showTerminal(index: number): void {
-    const terminal = this.indexToTerminal.get(index);
-    if (terminal) terminal.show();
-  }
-
   showFirst(): void {
     const first = this.indexToTerminal.values().next().value;
     if (first) first.show();
-  }
-
-  setOnTerminalClosed(callback: (index: number) => void): void {
-    this.onTerminalClosedCallback = callback;
   }
 
   disposeAll(): void {
