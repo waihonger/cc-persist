@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import type { Disposable, ExtensionContext, Terminal } from "vscode";
 import { window } from "vscode";
-import { _createEnvironmentVariableCollection, _setActiveTerminal, _setConfiguration, _setTerminals, window as mockWindow } from "./__mocks__/vscode";
+import { _createEnvironmentVariableCollection, _setConfiguration, _setTerminals, window as mockWindow } from "./__mocks__/vscode";
 import { RegistryWatcher, type PidSessionOutcome } from "../src/registryWatcher";
 import { TerminalManager } from "../src/terminalManager";
 import * as registry from "../src/sessionRegistry";
@@ -46,7 +46,6 @@ beforeEach(() => {
   for (const dir of [sessionsDir, stateDir, metadataDir]) fs.mkdirSync(dir);
   subscriptions = [];
   _setConfiguration({});
-  _setActiveTerminal(undefined);
   _setTerminals([]);
 });
 
@@ -55,7 +54,6 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   _setConfiguration({});
-  _setActiveTerminal(undefined);
   _setTerminals([]);
   for (const dir of [sessionsDir, stateDir, metadataDir]) {
     for (const file of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, file));
@@ -157,24 +155,6 @@ describe("RegistryWatcher", () => {
     expect(new Set(onRow.mock.calls.map(call => call[3])).size).toBe(1);
   });
 
-  it("fires the public status callback once for busy to idle, including an already adopted pid", async () => {
-    const read = vi.fn().mockResolvedValue([row]);
-    const { watcher, onRow } = watch(read);
-    const changed = vi.fn();
-    watcher.onStatusChange = changed;
-    watcher.markRestoreComplete();
-    await tick();
-    expect(changed).not.toHaveBeenCalled();
-    const idle = { ...row, status: "idle" };
-    read.mockResolvedValue([idle]);
-    writeRow(idle);
-    await tick();
-    expect(changed).toHaveBeenCalledExactlyOnceWith(row.pid, "busy", "idle", idle);
-    writeRow(idle);
-    await tick();
-    expect(changed).toHaveBeenCalledTimes(1);
-    expect(onRow).toHaveBeenCalledTimes(1);
-  });
 
   it.each([
     { field: "sessionId", update: { sessionId: "393788ff-5f8c-483b-922b-f8a5c749e9d6" } },
@@ -315,109 +295,6 @@ describe("RegistryWatcher", () => {
     const after = fs.statSync(statePath);
     expect({ ino: after.ino, mtimeMs: after.mtimeMs, ctimeMs: after.ctimeMs })
       .toEqual({ ino: before.ino, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs });
-  });
-});
-
-describe("notifications through extension.activate", () => {
-  async function activateFixture(settings: Record<string, unknown> = {}) {
-    _setConfiguration(settings);
-    const terminal = {
-      name: "Terminal", processId: Promise.resolve(9000), exitStatus: undefined,
-      show: vi.fn(), dispose: vi.fn(),
-    } as unknown as Terminal;
-    _setTerminals([terminal]);
-    vi.spyOn(config, "resolveStateDir").mockReturnValue(stateDir);
-    vi.spyOn(config, "resolveSignalBaseDir").mockReturnValue(metadataDir);
-    vi.spyOn(config, "resolveStartDirectory").mockReturnValue(root);
-    vi.spyOn(registry, "resolveSessionsDir").mockReturnValue(sessionsDir);
-    vi.spyOn(registry, "readRegistry").mockResolvedValue([row]);
-    vi.spyOn(processes, "snapshotProcesses").mockResolvedValue(new Map([
-      [row.pid, { pid: row.pid, ppid: 9000, startedAtMs: null, command: "claude" }],
-      [9000, { pid: 9000, ppid: 1, startedAtMs: null, command: "/bin/zsh" }],
-    ]));
-    // Keep activate, initial reconciliation, ancestry lookup and persistence real.
-    // Only OS watch startup is suppressed; transitions enter the public callback.
-    let watcher: RegistryWatcher | undefined;
-    vi.spyOn(RegistryWatcher.prototype, "start").mockImplementation(function (this: RegistryWatcher) {
-      watcher = this;
-    });
-    const information = vi.spyOn(mockWindow, "showInformationMessage").mockResolvedValue(undefined);
-    const warning = vi.spyOn(mockWindow, "showWarningMessage").mockResolvedValue(undefined);
-    const adopted = vi.spyOn(TerminalManager.prototype, "adoptWithSessionId");
-    const environmentVariableCollection = _createEnvironmentVariableCollection();
-    await activate({ subscriptions, environmentVariableCollection } as unknown as ExtensionContext);
-    await vi.waitFor(() => expect(adopted).toHaveReturnedWith(true));
-    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")))
-      .toEqual({ version: 2, terminals: [{ index: 0, sessionId: row.sessionId, cwd: row.cwd }] });
-    expect(watcher?.onStatusChange).toBeTypeOf("function");
-    const transition = async (to: string, changed: registry.RegistryRow = row, from = "busy") => {
-      watcher!.onStatusChange!(changed.pid, from, to, { ...changed, status: to });
-      await Promise.resolve();
-    };
-    return { terminal, information, warning, transition };
-  }
-
-  it.each([{}, { notifications: false }])("keeps notifications off for configuration %j", async (settings) => {
-    const { information, warning, terminal, transition } = await activateFixture(settings);
-    await transition("idle");
-    await transition("waiting");
-    expect(information).not.toHaveBeenCalled();
-    expect(warning).not.toHaveBeenCalled();
-    expect(terminal.show).not.toHaveBeenCalled();
-  });
-
-  it("shows the done toast for a tracked background terminal and Show focuses it", async () => {
-    const { information, warning, terminal, transition } = await activateFixture({ notifications: true });
-    information.mockResolvedValue("Show");
-    await transition("idle");
-    expect(information).toHaveBeenCalledExactlyOnceWith("research: done", "Show");
-    expect(warning).not.toHaveBeenCalled();
-    expect(terminal.show).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows the needs-input warning and Show focuses the tracked background terminal", async () => {
-    const { information, warning, terminal, transition } = await activateFixture({ notifications: true });
-    warning.mockResolvedValue("Show");
-    await transition("waiting");
-    expect(warning).toHaveBeenCalledExactlyOnceWith("research: needs input", "Show");
-    expect(information).not.toHaveBeenCalled();
-    expect(terminal.show).toHaveBeenCalledTimes(1);
-  });
-
-  it("uses the terminal index when the row has no name and dismissal does not focus", async () => {
-    const { information, terminal, transition } = await activateFixture({ notifications: true });
-    await transition("idle", { ...row, name: undefined });
-    expect(information).toHaveBeenCalledExactlyOnceWith("0: done", "Show");
-    expect(terminal.show).not.toHaveBeenCalled();
-  });
-
-  it("suppresses both notifications for the active terminal", async () => {
-    const { information, warning, terminal, transition } = await activateFixture({ notifications: true });
-    _setActiveTerminal(terminal);
-    await transition("idle");
-    await transition("waiting");
-    expect(information).not.toHaveBeenCalled();
-    expect(warning).not.toHaveBeenCalled();
-  });
-
-  it("ignores unknown pids and transitions other than busy to idle or waiting", async () => {
-    const { information, warning, transition } = await activateFixture({ notifications: true });
-    await transition("idle", { ...row, pid: 12345 });
-    await transition("waiting", { ...row, pid: 12345 });
-    await transition("idle", row, "waiting");
-    await transition("busy");
-    expect(information).not.toHaveBeenCalled();
-    expect(warning).not.toHaveBeenCalled();
-  });
-
-  it("reads notification configuration again after activation", async () => {
-    const { information, warning, transition } = await activateFixture();
-    _setConfiguration({ notifications: true });
-    await transition("idle");
-    expect(information).toHaveBeenCalledExactlyOnceWith("research: done", "Show");
-    _setConfiguration({ notifications: false });
-    await transition("waiting");
-    expect(warning).not.toHaveBeenCalled();
   });
 });
 

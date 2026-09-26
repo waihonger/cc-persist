@@ -1,6 +1,6 @@
 # CC Persist
 
-VS Code extension that persists Claude Code terminal sessions across VS Code restarts. Unlike [dtach-persist](https://github.com/waihonger/dtach-vscode-persist) which keeps processes alive via dtach sockets, cc-persist uses Claude Code's native `--resume` feature — no background processes, just automatically captured session IDs. Version 0.7.0 captures sessions from Claude Code's live-session registry and offers optional completion and input notifications.
+VS Code extension that persists Claude Code terminal sessions across VS Code restarts. Unlike [dtach-persist](https://github.com/waihonger/dtach-vscode-persist) which keeps processes alive via dtach sockets, cc-persist uses Claude Code's native `--resume` feature — no background processes, just automatically captured session IDs. Version 0.7.0 captures sessions from Claude Code's live-session registry.
 
 ## Workflow
 
@@ -85,14 +85,6 @@ Session IDs and working directories are saved on adoption. A terminal closed by 
 |---|---|---|
 | `cc-persist.resumeFlags` | `--dangerously-skip-permissions` | Flags passed to `claude` during restore. Values containing shell metacharacters are rejected |
 | `cc-persist.closeRogueTerminals` | `true` | Close untracked terminals that VS Code creates while saved sessions restore |
-| `cc-persist.notifications` | `false` | Show a toast when Claude finishes or needs input in a background terminal |
-
-When `cc-persist.notifications` is enabled, a tracked terminal that is not the active terminal can show:
-
-- `busy` → `idle`: an information toast, `<name or index>: done`.
-- `busy` → `waiting`: a warning toast, `<name or index>: needs input`.
-
-Both use the registry session name when present, otherwise the terminal index. Choose **Show** to focus that terminal. No status toast appears when a session is first seen or when notifications are disabled (the default). Changes to the setting apply on the next status event without a reload. The existing “Restored N Claude terminal(s)” toast is independent of this setting.
 
 ## Development
 

@@ -29,8 +29,6 @@ Upgrading from ≤0.4.x: run `scripts/migrate-name-only.py` (with VS Code quit) 
 3. **No `name` is passed to `vscode.window.createTerminal`** — Claude Code 2.1.139+ owns the tab title via OSC escape sequences. Saves happen on session adoption and user-initiated terminal close; shutdown preserves the saved entries.
 4. On VS Code reopen → `restoreTerminals()` reads v2 state, creates terminals with no `name` option in the saved cwd when it still exists (otherwise the workspace start directory), and runs `claude <resumeFlags> --resume '<sessionId>'`. When the default shell is zsh or bash, restore creates the terminal with `shellPath` and `shellArgs: ["-lc", "claude <resumeFlags> --resume '<sessionId>'; exec '<shell>' -il"]` (nothing is typed and VS Code does not inject shell integration into these terminals); other shells fall back to an immediate `sendText`.
 
-**Optional notifications:** `cc-persist.notifications` is a boolean with default `false`. `RegistryWatcher.onStatusChange(pid, from, to, row)` is a public settable callback for changed statuses of interactive PIDs seen in the previous reconcile. First sightings emit nothing, and missing PIDs lose their status history. `extension.ts` caches PID → terminal on adoption and rereads the setting on every status event. Only tracked terminals other than `vscode.window.activeTerminal` receive a toast: `busy` → `idle` calls `showInformationMessage("<name or index>: done", "Show")`; `busy` → `waiting` calls `showWarningMessage("<name or index>: needs input", "Show")`. The label is `row.name ?? terminalManager.getIndex(terminal)`, and **Show** calls `terminal.show()`. When disabled, this path makes no toast calls. The restore-count toast remains independent.
-
 **Required VS Code user setting** (for Claude's OSC titles to render in the tab):
 ```json
 "terminal.integrated.tabs.title": "${sequence}"
@@ -42,13 +40,13 @@ Without this, VS Code's default `${process}` template wins and tabs show the run
 - `pidResolver.ts` — Process-table parsing and ancestry matching, including the nested-Claude guard
 - `terminalManager.ts` — Terminal lifecycle: create, track, save/load state, restore sessions. Tracks UUIDs and validated absolute working directories by terminal index, and validates display names and configurable resume flags
 - `sessionRegistry.ts` — Resolves the sessions directory and reads validated interactive rows through the CLI or file fallback
-- `registryWatcher.ts` — Watches the registry with `fs.watch`, defers capture until restore completes, debounces events, bounds adoption retries, and exposes `onStatusChange`
+- `registryWatcher.ts` — Watches the registry with `fs.watch`, defers capture until restore completes, debounces events, and bounds adoption retries
 - `config.ts` — Path resolution: workspace ID (folder name + hash), state dir (`~/.cc-persist/`), and cc-overlord metadata base (`$TMPDIR/dtach-persist/`)
 - `types.ts` — `SessionInfo` and `SessionState` interfaces
 
 ## Testing
 
-Tests use vitest with a VS Code mock at `test/__mocks__/vscode.ts` (aliased in vitest.config.ts). The mock provides fake terminals, event emitters, active-terminal state, and notification stubs. Tests create real temp directories for state files. The registry reader accepts an injected `runAgents`; the watcher accepts injected registry and process readers and a settable status callback for isolated verification.
+Tests use vitest with a VS Code mock at `test/__mocks__/vscode.ts` (aliased in vitest.config.ts). The mock provides fake terminals and event emitters. Tests create real temp directories for state files. The registry reader accepts an injected `runAgents`; the watcher accepts injected registry and process readers for isolated verification.
 
 Stress tests (`*.stress.test.ts`) cover: duplicate indices, invalid state schemas, rapid create/close cycles, name validation edge cases, idempotent restore, index collision avoidance.
 
