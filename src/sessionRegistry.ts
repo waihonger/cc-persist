@@ -81,7 +81,8 @@ export async function readRegistry(opts: {
     const output = await (opts.runAgents ?? runAgents)();
     const raw: unknown = JSON.parse(output);
     if (Array.isArray(raw)) {
-      return raw.map(parseRegistryRow).filter((row): row is RegistryRow => row !== null);
+      const rows = raw.map(parseRegistryRow).filter((row): row is RegistryRow => row !== null);
+      if (rows.length > 0) return rows;
     }
   } catch {
     // Missing CLI, command failure, empty output, or invalid JSON: read files.

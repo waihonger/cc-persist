@@ -72,11 +72,14 @@ describe("readRegistry", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const file of fs.readdirSync(sessionsDir)) fs.unlinkSync(path.join(sessionsDir, file));
     fs.rmdirSync(sessionsDir);
   });
 
   it("uses injected agents JSON instead of falling back to files", async () => {
+    const readdir = vi.spyOn(fs.promises, "readdir");
+    const readFile = vi.spyOn(fs.promises, "readFile");
     const cliRow = { ...sample, pid: 44584, name: "cli-session" };
     const runAgents = vi.fn().mockResolvedValue(JSON.stringify([
       cliRow, { ...sample, kind: "background" }, { ...sample, pid: -1 },
@@ -85,6 +88,8 @@ describe("readRegistry", () => {
     expect(await readRegistry({ sessionsDir, runAgents }))
       .toEqual([{ ...expected, pid: 44584, name: "cli-session" }]);
     expect(runAgents).toHaveBeenCalledExactlyOnceWith();
+    expect(readdir).not.toHaveBeenCalled();
+    expect(readFile).not.toHaveBeenCalled();
   });
 
   it("falls back when the command throws, skipping malformed and unrelated files", async () => {
@@ -105,8 +110,13 @@ describe("readRegistry", () => {
     expect(await readRegistry({ sessionsDir, runAgents: async () => output })).toEqual([expected]);
   });
 
-  it("treats an empty JSON array as authoritative even when files exist", async () => {
-    expect(await readRegistry({ sessionsDir, runAgents: async () => "[]" })).toEqual([]);
+  it.each([
+    { label: "empty", rows: [] },
+    { label: "background-only", rows: [{ ...sample, kind: "background" }] },
+    { label: "invalid-only", rows: [{ ...sample, pid: -1 }] },
+  ])("falls back to files for an $label CLI array", async ({ rows }) => {
+    expect(await readRegistry({ sessionsDir, runAgents: async () => JSON.stringify(rows) }))
+      .toEqual([expected]);
   });
 
   it("returns no rows when the command fails and the directory is missing", async () => {
