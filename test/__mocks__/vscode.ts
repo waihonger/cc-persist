@@ -52,8 +52,8 @@ export const window = {
     dispose: () => {},
   }),
   showErrorMessage: () => {},
-  showWarningMessage: () => {},
-  showInformationMessage: () => {},
+  showWarningMessage: async (_message: string, ..._items: string[]): Promise<string | undefined> => undefined,
+  showInformationMessage: async (_message: string, ..._items: string[]): Promise<string | undefined> => undefined,
   createTerminal: (opts: unknown) => {
     const t = { name: (opts as Record<string, unknown>)?.name || "Terminal", creationOptions: opts, show: () => {}, dispose: () => {}, processId: Promise.resolve(999), sendText: () => {}, exitStatus: { reason: 3 /* User */ } };
     return t;
