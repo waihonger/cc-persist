@@ -8,25 +8,41 @@ import { TerminalManager, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 let terminalManager: TerminalManager | undefined;
 const pidToTerminal = new Map<number, vscode.Terminal>();
 
+async function resolveTerminalPid(terminal: vscode.Terminal): Promise<number | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const deadline = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), 2000);
+    });
+    return await Promise.race([terminal.processId, deadline]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function adoptPidSession(
   claudePid: number,
   sid: string,
   cwd: string | undefined,
   processSnapshot: Promise<Map<number, ProcEntry>>,
+  startedAt: number | undefined,
 ): Promise<PidSessionOutcome> {
   if (!terminalManager) return "retry";
   const procs = await processSnapshot;
   if (procs.size === 0) return "retry";
-  if (!isLiveClaudePid(claudePid, procs)) return "discard";
+  if (!isLiveClaudePid(claudePid, procs, startedAt)) return "discard";
   const terminals = vscode.window.terminals;
-  const pidPairs = await Promise.all(terminals.map(async (terminal) => [terminal, await terminal.processId] as const));
+  const pidPairs = await Promise.all(terminals.map(async (terminal) => [terminal, await resolveTerminalPid(terminal)] as const));
+  const hasUnresolvedTerminal = pidPairs.some(([, pid]) => typeof pid !== "number");
   const shellPids = new Set(
     pidPairs
       .filter(([, pid]) => typeof pid === "number")
       .map(([, pid]) => pid as number),
   );
   const shellPid = findOwningShellPid(claudePid, procs, shellPids);
-  if (shellPid === null) return "retry";
+  if (shellPid === null) return hasUnresolvedTerminal ? "retry" : "foreign";
   const owner = pidPairs.find(([, pid]) => pid === shellPid)?.[0];
   if (!owner) return "retry";
   if (!vscode.window.terminals.includes(owner) || owner.exitStatus !== undefined) return "retry";
@@ -41,6 +57,8 @@ async function adoptPidSession(
 export async function activate(
   context: vscode.ExtensionContext,
 ): Promise<void> {
+  context.environmentVariableCollection.clear();
+  context.environmentVariableCollection.description = "";
   const log = vscode.window.createOutputChannel("cc-persist");
   context.subscriptions.push(log);
   log.appendLine("Activating cc-persist");
@@ -127,7 +145,7 @@ export async function activate(
       }
     };
 
-    // Restore as soon as VS Code's rogue default terminal appears — fastest path.
+    // Restore as soon as VS Code's rogue default terminal appears for the fastest path.
     // Fallback timeout in case no rogue terminal is created.
     const rogueWatcher = vscode.window.onDidOpenTerminal((t) => {
       if (!terminalManager!.isTracked(t)) {

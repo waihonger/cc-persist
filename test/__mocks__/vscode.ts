@@ -1,4 +1,23 @@
+import { vi } from "vitest";
+
 type Callback = (...args: unknown[]) => void;
+
+export function _createEnvironmentVariableCollection(
+  initial: Record<string, string> = {},
+  initialDescription?: string,
+) {
+  const mutations = new Map(Object.entries(initial));
+  let description = initialDescription;
+  const descriptionChanges = vi.fn((value: string | undefined) => { description = value; });
+  return {
+    mutations,
+    clear: vi.fn(() => mutations.clear()),
+    replace: vi.fn((variable: string, value: string) => mutations.set(variable, value)),
+    get description() { return description; },
+    set description(value: string | undefined) { descriptionChanges(value); },
+    descriptionChanges,
+  };
+}
 
 class EventEmitter {
   private listeners: Callback[] = [];

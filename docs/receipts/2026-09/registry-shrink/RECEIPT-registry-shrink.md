@@ -80,4 +80,31 @@ No stryker in this repo; the negative-control tests stand in.
 
 ## Not verified
 
-The live end-to-end in VS Code (start `claude` in a managed terminal with no hook, state.json within 2 s) was not run: it needs the packaged extension installed in a running VS Code. The U5 tests cover the same path with a real temp dir, a real `fs.watch` write, and the real `adoptWithSessionId` + state.json write (500 ms tick). The `~/.claude/settings.json` hook (line 175) is still present; the lane removes it after landing.
+The live end-to-end in VS Code (start `claude` in a managed terminal with no hook, state.json within 2 s) was not run: it needs the packaged extension installed in a running VS Code. The U5 tests cover the same path with a real temp dir and the real `adoptWithSessionId` + state.json write (500 ms tick); after Bounce 1 the watch event itself is mocked (see Bounce 1, residuals). The `~/.claude/settings.json` hook (line 175) is still present; the lane removes it after landing.
+
+## Bounce 1 (lane b:23265, review REVIEW-codex.md)
+
+Base for this bounce: 344c926. All source written by codex (B1, B2, B3; reports codex-B1/B2/B3.md here); I hand-wrote nothing in src or test.
+
+| Finding | Fix | Unit |
+|---|---|---|
+| 1 session change under an adopted pid | `adopted` is a pid to {sessionId, cwd} map; every reconcile re-calls onRow when either differs; an event during an in-flight adoption sets a pending full reconcile that re-reads and compares against the payload actually adopted | B2 |
+| 2 pid reuse | `RegistryRow.startedAt` (ms, kept when finite and positive); `onRow` takes it as 5th arg; `adoptPidSession` passes it as `notAfterMs` to `isLiveClaudePid` (pidResolver.ts untouched, signature already allowed it) | B1, B2 |
+| 3 debounce starvation | 300 ms trailing plus a 2 s max wait from the first pending event | B2 |
+| 4 stale env mutation | `activate` calls `environmentVariableCollection.clear()` and resets the description first | B2 |
+| 5 CLI hang | `killSignal: SIGKILL`, child handle kept, independent 6 s deadline that also kills the child and falls back to files | B1 |
+| 6 processId stall | each `terminal.processId` await bounded to 2 s (Promise.race); unresolved counts as absent and routes to retry | B2 |
+| 7 (lane) retry storm | new outcome `foreign` (non-empty snapshot, all terminals resolved, no owning shell): not retried, not logged per row, one aggregate log line per reconcile, remembered by payload until it changes or the pid disappears | B2 |
+| 7 (codex) directory replacement | not chased, per lane | none |
+
+Tests added (B3, test/registryWatcher.test.ts + mock stub): payload change re-adopts for sessionId and for cwd alone; unchanged does not; in-flight rewrite gets a second onRow with the newer payload; events every 100 ms for 3 s reconcile within 2 s; env collection cleared, `replace` never called with DTACH_SIGNAL_DIR; stale `startedAt` discarded with state.json untouched and matching `startedAt` adopts; a never-resolving terminal releases at 2 s and ends in retry not foreign; 100 foreign rows plus 1 owned row give exactly one adoption, zero retry rounds and one foreign-count log line. sessionRegistry tests: startedAt kept/dropped, a never-resolving runAgents falls back within the deadline.
+
+Verify on the bounce tip:
+- `npm run compile` exit 0; `npx tsc --noEmit -p .` exit 0.
+- `npm test`: `Test Files 10 passed (10)`, `Tests 271 passed (271)` (248 before the bounce).
+- Phase 0: same command as before over the same file set, no matches; `rg` for DTACH_SIGNAL_DIR|sidWatcher|parseSidPayload|signals over src/ prints nothing.
+
+Residuals (not fixed):
+- B3 mocks `fs.watch` globally in test/registryWatcher.test.ts (codex reported EMFILE from real watches inside its sandbox). The earlier real-`fs.watch` adoption test (ba66aa5) passed on the host; the real OS watch path is no longer exercised by the suite.
+- A `discard` outcome (row whose pid is not a live Claude process) is not remembered, so such a stale row is re-attempted and re-logged on each event until its file goes away.
+- Codex issue 7 (watched directory deleted and recreated without an error event) remains open by lane decision.

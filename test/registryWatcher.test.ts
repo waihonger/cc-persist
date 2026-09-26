@@ -4,13 +4,21 @@ import * as os from "os";
 import * as path from "path";
 import type { Disposable, ExtensionContext, Terminal } from "vscode";
 import { window } from "vscode";
-import { _setActiveTerminal, _setConfiguration, _setTerminals, window as mockWindow } from "./__mocks__/vscode";
+import { _createEnvironmentVariableCollection, _setActiveTerminal, _setConfiguration, _setTerminals, window as mockWindow } from "./__mocks__/vscode";
 import { RegistryWatcher, type PidSessionOutcome } from "../src/registryWatcher";
 import { TerminalManager } from "../src/terminalManager";
 import * as registry from "../src/sessionRegistry";
 import * as processes from "../src/pidResolver";
 import * as config from "../src/config";
 import { activate } from "../src/extension";
+
+// Keep file reads and writes real; deliver watch events explicitly for deterministic unit tests.
+vi.mock("fs", async (importOriginal) => ({
+  ...await importOriginal<typeof import("fs")>(),
+  watch: vi.fn(),
+}));
+
+const watchListeners = new Set<fs.WatchListener<string>>();
 
 const row: registry.RegistryRow = {
   pid: 88212, sessionId: "293788ff-5f8c-483b-922b-f8a5c749e9d6",
@@ -24,6 +32,15 @@ let metadataDir: string;
 let subscriptions: Disposable[];
 
 beforeEach(() => {
+  watchListeners.clear();
+  vi.mocked(fs.watch).mockReset();
+  vi.mocked(fs.watch).mockImplementation(((_directory: fs.PathLike, listener: fs.WatchListener<string>) => {
+    watchListeners.add(listener);
+    return {
+      on: vi.fn().mockReturnThis(),
+      close: vi.fn(() => watchListeners.delete(listener)),
+    } as unknown as fs.FSWatcher;
+  }) as typeof fs.watch);
   root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-persist-registry-watcher-"));
   [sessionsDir, stateDir, metadataDir] = ["sessions", "state", "metadata"].map(name => path.join(root, name));
   for (const dir of [sessionsDir, stateDir, metadataDir]) fs.mkdirSync(dir);
@@ -49,6 +66,11 @@ afterEach(() => {
 
 function writeRow(value = row): void {
   fs.writeFileSync(path.join(sessionsDir, `${value.pid}.json`), JSON.stringify(value));
+  emitWatch(`${value.pid}.json`);
+}
+
+function emitWatch(filename = `${row.pid}.json`): void {
+  for (const listener of watchListeners) listener("change", filename);
 }
 
 function watch(read: typeof registry.readRegistry, onRow = vi.fn<ConstructorParameters<typeof RegistryWatcher>[2]>()
@@ -69,7 +91,7 @@ describe("RegistryWatcher", () => {
     watcher.markRestoreComplete();
     await vi.waitFor(() => expect(onRow).toHaveBeenCalledTimes(1));
     expect(read).toHaveBeenCalledWith({ sessionsDir });
-    expect(onRow).toHaveBeenCalledWith(row.pid, row.sessionId, row.cwd, expect.any(Promise));
+    expect(onRow).toHaveBeenCalledWith(row.pid, row.sessionId, row.cwd, expect.any(Promise), row.startedAt);
 
     watcher.markRestoreComplete();
     writeRow();
@@ -78,7 +100,7 @@ describe("RegistryWatcher", () => {
     expect(onRow).toHaveBeenCalledTimes(1);
   });
 
-  it("adopts a new row after a real filesystem write and persists its UUID and cwd within 500 ms", async () => {
+  it("adopts a new row from a real file after a watch event and persists its UUID and cwd within 500 ms", async () => {
     const manager = new TerminalManager(stateDir, metadataDir, root, window.createOutputChannel("test"));
     subscriptions.push({ dispose: () => manager.disposeAll() });
     const terminal = window.createTerminal({});
@@ -154,6 +176,117 @@ describe("RegistryWatcher", () => {
     expect(onRow).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { field: "sessionId", update: { sessionId: "393788ff-5f8c-483b-922b-f8a5c749e9d6" } },
+    { field: "cwd", update: { cwd: "/tmp/changed-project" } },
+  ])("re-adopts a changed $field but skips an unchanged payload", async ({ update }) => {
+    vi.useFakeTimers();
+    const initial = { ...row, startedAt: 1790397130389 };
+    const read = vi.fn().mockResolvedValue([initial]);
+    const { watcher, onRow } = watch(read);
+    watcher.markRestoreComplete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onRow).toHaveBeenCalledExactlyOnceWith(
+      initial.pid, initial.sessionId, initial.cwd, expect.any(Promise), initial.startedAt,
+    );
+    writeRow(initial);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(onRow).toHaveBeenCalledTimes(1);
+
+    const changed = { ...initial, ...update };
+    read.mockResolvedValue([changed]);
+    writeRow(changed);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(onRow).toHaveBeenNthCalledWith(
+      2, changed.pid, changed.sessionId, changed.cwd, expect.any(Promise), changed.startedAt,
+    );
+    writeRow(changed);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(onRow).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-adopts a rewrite received while the first adoption is in flight", async () => {
+    vi.useFakeTimers();
+    let finish!: (outcome: PidSessionOutcome) => void;
+    const held = new Promise<PidSessionOutcome>((resolve) => { finish = resolve; });
+    const onRow = vi.fn<ConstructorParameters<typeof RegistryWatcher>[2]>()
+      .mockImplementationOnce(() => held).mockResolvedValue("adopted");
+    const read = vi.fn().mockResolvedValue([row]);
+    const { watcher } = watch(read, onRow);
+    watcher.markRestoreComplete();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onRow).toHaveBeenCalledTimes(1);
+
+    const changed = { ...row, sessionId: "393788ff-5f8c-483b-922b-f8a5c749e9d6", cwd: "/tmp/new" };
+    read.mockResolvedValue([changed]);
+    writeRow(changed);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(onRow).toHaveBeenCalledTimes(1);
+    finish("adopted");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onRow).toHaveBeenNthCalledWith(
+      2, changed.pid, changed.sessionId, changed.cwd, expect.any(Promise), changed.startedAt,
+    );
+    await vi.advanceTimersByTimeAsync(300);
+    expect(onRow).toHaveBeenCalledTimes(2);
+  });
+
+  it("reconciles within two seconds during events every 100 ms for three seconds", async () => {
+    vi.useFakeTimers();
+    const reconciledAt: number[] = [];
+    const read = vi.fn(async () => { reconciledAt.push(Date.now()); return []; });
+    const { watcher } = watch(read);
+    watcher.markRestoreComplete();
+    await vi.advanceTimersByTimeAsync(0);
+    read.mockClear();
+    reconciledAt.length = 0;
+    const start = Date.now();
+    for (let i = 0; i < 30; i++) {
+      emitWatch();
+      await vi.advanceTimersByTimeAsync(100);
+      if (i === 18) expect(read).not.toHaveBeenCalled();
+      if (i === 19) expect(read).toHaveBeenCalledTimes(1);
+    }
+    expect(reconciledAt[0] - start).toBe(2000);
+    expect(reconciledAt[0]).toBeLessThan(Date.now());
+    await vi.advanceTimersByTimeAsync(199);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("remembers foreign payloads until they change or disappear and reappear", async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValue([row]);
+    const onRow = vi.fn<ConstructorParameters<typeof RegistryWatcher>[2]>().mockResolvedValue("foreign");
+    const { watcher } = watch(read, onRow);
+    watcher.markRestoreComplete();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(onRow).toHaveBeenCalledTimes(1);
+    emitWatch();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(onRow).toHaveBeenCalledTimes(1);
+
+    const changed = { ...row, cwd: "/tmp/foreign-new" };
+    read.mockResolvedValue([changed]);
+    emitWatch();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(onRow).toHaveBeenCalledTimes(2);
+    read.mockResolvedValue([]);
+    emitWatch();
+    await vi.advanceTimersByTimeAsync(300);
+    read.mockResolvedValue([changed]);
+    emitWatch();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(onRow).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onRow).toHaveBeenCalledTimes(3);
+  });
+
   it("negative control: an empty registry adopts nothing and leaves state.json untouched", async () => {
     vi.useFakeTimers();
     const statePath = path.join(stateDir, "state.json");
@@ -211,7 +344,8 @@ describe("notifications through extension.activate", () => {
     const information = vi.spyOn(mockWindow, "showInformationMessage").mockResolvedValue(undefined);
     const warning = vi.spyOn(mockWindow, "showWarningMessage").mockResolvedValue(undefined);
     const adopted = vi.spyOn(TerminalManager.prototype, "adoptWithSessionId");
-    await activate({ subscriptions } as unknown as ExtensionContext);
+    const environmentVariableCollection = _createEnvironmentVariableCollection();
+    await activate({ subscriptions, environmentVariableCollection } as unknown as ExtensionContext);
     await vi.waitFor(() => expect(adopted).toHaveReturnedWith(true));
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")))
       .toEqual({ version: 2, terminals: [{ index: 0, sessionId: row.sessionId, cwd: row.cwd }] });
@@ -284,5 +418,136 @@ describe("notifications through extension.activate", () => {
     _setConfiguration({ notifications: false });
     await transition("waiting");
     expect(warning).not.toHaveBeenCalled();
+  });
+});
+
+describe("registry adoption through extension.activate", () => {
+  beforeEach(() => vi.useFakeTimers());
+
+  function terminalWithPid(processId: Promise<number | undefined>): Terminal {
+    return { name: "Terminal", processId, exitStatus: undefined, show: vi.fn(), dispose: vi.fn() } as unknown as Terminal;
+  }
+
+  function ownedSnapshot(startedAtMs: number | null = null): Map<number, processes.ProcEntry> {
+    return new Map([
+      [row.pid, { pid: row.pid, ppid: 9000, startedAtMs, command: "claude" }],
+      [9000, { pid: 9000, ppid: 1, startedAtMs: null, command: "/bin/zsh" }],
+    ]);
+  }
+
+  async function activateRegistry(
+    rows: registry.RegistryRow[],
+    procs = ownedSnapshot(),
+    terminals = [terminalWithPid(Promise.resolve(9000))],
+  ) {
+    _setTerminals(terminals);
+    vi.spyOn(config, "resolveStateDir").mockReturnValue(stateDir);
+    vi.spyOn(config, "resolveSignalBaseDir").mockReturnValue(metadataDir);
+    vi.spyOn(config, "resolveStartDirectory").mockReturnValue(root);
+    vi.spyOn(registry, "resolveSessionsDir").mockReturnValue(sessionsDir);
+    const read = vi.spyOn(registry, "readRegistry").mockResolvedValue(rows);
+    const snapshot = vi.spyOn(processes, "snapshotProcesses").mockResolvedValue(procs);
+    const adopted = vi.spyOn(TerminalManager.prototype, "adoptWithSessionId");
+    const log = vi.fn<(line: string) => void>();
+    vi.spyOn(window, "createOutputChannel").mockReturnValue({
+      appendLine: log, dispose: vi.fn(),
+    } as unknown as ReturnType<typeof window.createOutputChannel>);
+    const environmentVariableCollection = _createEnvironmentVariableCollection(
+      { DTACH_SIGNAL_DIR: "/tmp/legacy-capture" }, "legacy description",
+    );
+    await activate({ subscriptions, environmentVariableCollection } as unknown as ExtensionContext);
+    return { read, snapshot, adopted, log, environmentVariableCollection, terminals };
+  }
+
+  it("clears persisted capture environment mutations and description before reading the registry", async () => {
+    const { read, environmentVariableCollection: collection } = await activateRegistry([row]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(collection.clear).toHaveBeenCalledExactlyOnceWith();
+    expect(collection.mutations.size).toBe(0);
+    expect(collection.description).toBe("");
+    expect(collection.descriptionChanges).toHaveBeenCalledExactlyOnceWith("");
+    expect(collection.replace).not.toHaveBeenCalledWith("DTACH_SIGNAL_DIR", expect.anything());
+    expect(collection.replace).not.toHaveBeenCalled();
+    expect(collection.clear.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder[0]);
+  });
+
+  it.each([
+    { label: "stale", startedAt: 1_000_000, expectedAdoptions: 0 },
+    { label: "matching", startedAt: 2_000_000, expectedAdoptions: 1 },
+  ])("honors a $label startedAt against the process generation", async ({ startedAt, expectedAdoptions }) => {
+    const statePath = path.join(stateDir, "state.json");
+    const original = JSON.stringify({ version: 2, terminals: [] }, null, 2);
+    fs.writeFileSync(statePath, original);
+    fs.utimesSync(statePath, new Date(0), new Date(0));
+    const before = fs.statSync(statePath);
+    const { adopted, snapshot, log, terminals } = await activateRegistry([{ ...row, startedAt }], ownedSnapshot(2_000_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(adopted).toHaveBeenCalledTimes(expectedAdoptions);
+    if (expectedAdoptions === 0) {
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(`Discarded registry row for pid ${row.pid}`));
+      expect(fs.readFileSync(statePath, "utf8")).toBe(original);
+      const after = fs.statSync(statePath);
+      expect({ ino: after.ino, mtimeMs: after.mtimeMs, ctimeMs: after.ctimeMs })
+        .toEqual({ ino: before.ino, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs });
+    } else {
+      expect(adopted).toHaveBeenCalledExactlyOnceWith(terminals[0], row.sessionId, row.cwd);
+      expect(JSON.parse(fs.readFileSync(statePath, "utf8")))
+        .toEqual({ version: 2, terminals: [{ index: 0, sessionId: row.sessionId, cwd: row.cwd }] });
+    }
+  });
+
+  it("releases unresolved terminal PID lookup at two seconds and retries rather than declaring foreign", async () => {
+    const procs = ownedSnapshot();
+    procs.set(row.pid, { pid: row.pid, ppid: 1, startedAtMs: null, command: "claude" });
+    const unresolved = terminalWithPid(new Promise<number | undefined>(() => {}));
+    const { read, snapshot, adopted, log } = await activateRegistry(
+      [row], procs, [terminalWithPid(Promise.resolve(9000)), unresolved],
+    );
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(adopted).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    // The two-second lookup has finished; only the retry timer remains.
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(adopted).not.toHaveBeenCalled();
+    expect(log.mock.calls.filter(([line]) => /foreign/i.test(line))).toHaveLength(0);
+    expect(fs.existsSync(path.join(stateDir, "state.json"))).toBe(false);
+  });
+
+  it("adopts one owned row among 100 foreign rows with zero retries and one foreign-count log", async () => {
+    const foreignRows = Array.from({ length: 100 }, (_, index) => ({ ...row, pid: 40_000 + index }));
+    const procs = ownedSnapshot();
+    for (const foreign of foreignRows) {
+      procs.set(foreign.pid, { pid: foreign.pid, ppid: 1, startedAtMs: null, command: "claude" });
+    }
+    const { read, snapshot, adopted, log, terminals } = await activateRegistry([...foreignRows, row], procs);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(adopted).toHaveBeenCalledExactlyOnceWith(terminals[0], row.sessionId, row.cwd);
+    expect(adopted).toHaveReturnedWith(true);
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")))
+      .toEqual({ version: 2, terminals: [{ index: 0, sessionId: row.sessionId, cwd: row.cwd }] });
+    const foreignLogs = () => log.mock.calls.filter(([line]) => /foreign/i.test(line));
+    expect(foreignLogs()).toHaveLength(1);
+    expect(foreignLogs()[0][0]).toMatch(/100.*foreign/i);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(adopted).toHaveBeenCalledTimes(1);
+    expect(foreignLogs()).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    emitWatch();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(adopted).toHaveBeenCalledTimes(1);
+    expect(foreignLogs()).toHaveLength(1);
   });
 });
