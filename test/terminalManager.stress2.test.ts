@@ -380,20 +380,20 @@ describe("STRESS2: NEW -- signalBaseDir does not exist when mkdirSync is called"
     } catch { /* may not exist */ }
   });
 
-  it("createTerminal creates signalDir even when it does not exist", () => {
+  it("createTerminal does not create a signal directory", () => {
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(() => tm.createTerminal("test")).not.toThrow();
-    expect(fs.existsSync(path.join(signalBaseDir, "signals"))).toBe(true);
+    expect(fs.existsSync(signalBaseDir)).toBe(false);
   });
 
-  it("restoreTerminals creates signalDir even when base does not exist", () => {
+  it("restoreTerminals does not create a signal directory", () => {
     writeState(stateDir, {
       version: 2,
       terminals: [{ name: "session", index: 0, sessionId: SID }],
     });
     tm = new TerminalManager(stateDir, signalBaseDir, "/tmp", makeLog());
     expect(() => tm.restoreTerminals()).not.toThrow();
-    expect(fs.existsSync(path.join(signalBaseDir, "signals"))).toBe(true);
+    expect(fs.existsSync(signalBaseDir)).toBe(false);
   });
 
   it("writeWorkspaceMetadata creates signalBaseDir when it does not exist", () => {

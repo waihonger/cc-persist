@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { signalDir } from "./config";
 import type { SessionInfo, SessionState } from "./types";
 
 /** Only allow safe characters in session names — prevents shell injection via sendText. */
@@ -28,23 +27,6 @@ function isValidSessionCwd(cwd: unknown): cwd is string {
     && cwd.length <= 1024
     && !/[\0\r\n]/.test(cwd)
     && path.isAbsolute(cwd);
-}
-
-/** Parse the JSON SessionStart payload. */
-export function parseSidPayload(raw: string): { sessionId: string; cwd?: string } | null {
-  const trimmed = raw.trim();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const payload = parsed as Record<string, unknown>;
-  const sessionId = payload.sessionId;
-  if (!isValidSessionId(sessionId)) return null;
-  const cwd = isValidSessionCwd(payload.cwd) ? payload.cwd : undefined;
-  return { sessionId: sessionId as string, ...(cwd ? { cwd } : {}) };
 }
 
 export function isValidIndex(index: unknown): boolean {
@@ -110,10 +92,6 @@ export class TerminalManager {
 
   private get statePath(): string {
     return path.join(this.stateDir, "state.json");
-  }
-
-  private get sigDir(): string {
-    return signalDir(this.signalBaseDir);
   }
 
   private writeAtomic(filePath: string, data: string): void {
@@ -195,12 +173,7 @@ export class TerminalManager {
   createTerminal(_unusedName?: string): vscode.Terminal {
     const index = this.nextIndex++;
 
-    fs.mkdirSync(this.sigDir, { recursive: true });
-
     const terminal = vscode.window.createTerminal({
-      env: {
-        DTACH_SIGNAL_DIR: this.sigDir,
-      },
       cwd: this.startDir,
       isTransient: true,
       // Unknown codicon id renders no glyph and reserves no width; bypasses the
@@ -223,8 +196,6 @@ export class TerminalManager {
 
     const state = this.loadState();
     if (state.terminals.length === 0) return [];
-
-    fs.mkdirSync(this.sigDir, { recursive: true });
 
     const seenIndices = new Set<number>();
     const restored: vscode.Terminal[] = [];
@@ -251,9 +222,6 @@ export class TerminalManager {
           shellPath,
           shellArgs: ["-lc", `${cmd}; exec '${shellPath}' -il`],
         } : {}),
-        env: {
-          DTACH_SIGNAL_DIR: this.sigDir,
-        },
         cwd,
         isTransient: true,
         iconPath: new vscode.ThemeIcon("none"),

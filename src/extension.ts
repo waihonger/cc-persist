@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
-import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory, signalDir } from "./config";
+import { resolveStateDir, resolveSignalBaseDir, resolveStartDirectory } from "./config";
 import { findOwningShellPid, isLiveClaudePid, type ProcEntry } from "./pidResolver";
-import { SidWatcher, type PidSessionOutcome } from "./sidWatcher";
+import { RegistryWatcher, type PidSessionOutcome } from "./registryWatcher";
+import { readRegistry, resolveSessionsDir } from "./sessionRegistry";
 import { TerminalManager, DEFAULT_RESUME_FLAGS } from "./terminalManager";
 
 let terminalManager: TerminalManager | undefined;
@@ -10,13 +11,12 @@ async function adoptPidSession(
   claudePid: number,
   sid: string,
   cwd: string | undefined,
-  fileMtimeMs: number,
   processSnapshot: Promise<Map<number, ProcEntry>>,
 ): Promise<PidSessionOutcome> {
   if (!terminalManager) return "retry";
   const procs = await processSnapshot;
   if (procs.size === 0) return "retry";
-  if (!isLiveClaudePid(claudePid, procs, fileMtimeMs)) return "discard";
+  if (!isLiveClaudePid(claudePid, procs)) return "discard";
   const terminals = vscode.window.terminals;
   const pidPairs = await Promise.all(terminals.map(async (terminal) => [terminal, await terminal.processId] as const));
   const shellPids = new Set(
@@ -46,13 +46,8 @@ export async function activate(
   const stateDir = resolveStateDir();
   const signalBaseDir = resolveSignalBaseDir();
   const startDir = resolveStartDirectory();
-  const sigDir = signalDir(signalBaseDir);
-
-  context.environmentVariableCollection.replace("DTACH_SIGNAL_DIR", sigDir);
-  context.environmentVariableCollection.description = "cc-persist: session tracking for all terminals";
 
   log.appendLine(`State dir: ${stateDir}`);
-  log.appendLine(`Signal dir: ${sigDir}`);
   log.appendLine(`Start dir: ${startDir}`);
 
   terminalManager = new TerminalManager(stateDir, signalBaseDir, startDir, log, resumeFlags, vscode.env.shell);
@@ -63,10 +58,10 @@ export async function activate(
   }
   terminalManager.registerEventHandlers(context);
 
-  // Session-ID watcher: ingests pid-<pid>.sid captures from the SessionStart hook
-  const sidWatcher = new SidWatcher(sigDir, log, adoptPidSession);
-  sidWatcher.start();
-  context.subscriptions.push({ dispose: () => sidWatcher.dispose() });
+  // Capture live session IDs from Claude Code's registry after restore completes.
+  const registryWatcher = new RegistryWatcher(resolveSessionsDir(), log, adoptPidSession, readRegistry);
+  registryWatcher.start();
+  context.subscriptions.push({ dispose: () => registryWatcher.dispose() });
 
   // New terminal command
   context.subscriptions.push(
@@ -97,7 +92,7 @@ export async function activate(
       rogueWatcher.dispose();
       const terminals = terminalManager!.restoreTerminals();
       terminalManager!.showFirst();
-      sidWatcher.markRestoreComplete();
+      registryWatcher.markRestoreComplete();
       log.appendLine(`Restore complete — ${terminals.length} terminal(s)`);
       if (terminals.length > 0) {
         vscode.window.showInformationMessage(`Restored ${terminals.length} Claude terminal(s)`);
@@ -115,7 +110,7 @@ export async function activate(
     });
     setTimeout(doRestore, 150);
   } else {
-    sidWatcher.markRestoreComplete();
+    registryWatcher.markRestoreComplete();
   }
 
   log.appendLine("cc-persist activated");

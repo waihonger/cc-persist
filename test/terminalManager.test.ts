@@ -85,10 +85,10 @@ describe("TerminalManager", () => {
       expect(tm.getIndex(t2)).toBe(1);
     });
 
-    it("creates terminal with env vars", () => {
+    it("creates terminal without capture environment variables", () => {
       const t = tm.createTerminal();
       const opts = (t as any).creationOptions;
-      expect(opts.env.DTACH_SIGNAL_DIR).toBeDefined();
+      expect(opts.env).toBeUndefined();
     });
 
     it("does not set name on created terminal (Claude owns the title)", () => {

@@ -34,14 +34,9 @@ export function resolveStateDir(): string {
   return path.join(os.homedir(), ".cc-persist", resolveWorkspaceId());
 }
 
-/** Ephemeral signal base dir ($TMPDIR/dtach-persist/<workspaceId>/) — for shell hooks. */
+/** Ephemeral base dir ($TMPDIR/dtach-persist/<workspaceId>/) — for cc-overlord metadata. */
 export function resolveSignalBaseDir(): string {
   return path.join(os.tmpdir(), SIGNAL_DIR_PREFIX, resolveWorkspaceId());
-}
-
-/** Signal files subdirectory. */
-export function signalDir(baseDir: string): string {
-  return path.join(baseDir, "signals");
 }
 
 export function resolveStartDirectory(): string {
