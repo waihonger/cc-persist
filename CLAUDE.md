@@ -24,10 +24,12 @@ Upgrading from ≤0.4.x: run `scripts/migrate-name-only.py` (with VS Code quit) 
 ## Architecture
 
 **Session persistence flow:**
-1. Activation injects `DTACH_SIGNAL_DIR` into every terminal through `environmentVariableCollection`.
-2. **PID lane:** the `SessionStart` hook always atomically publishes `pid-<claudePid>.sid` through a `.tmp` + `mv`, with JSON `{"sessionId":"<uuid>","cwd":"/absolute/path"}`. `pidResolver.ts` first verifies that the reported process is Claude, then walks its ancestry to a VS Code terminal's `processId`; `adoptWithSessionId()` tracks that terminal and saves its UUID + cwd without a name. A terminal profile that runs Claude directly or uses `exec claude` resolves because the Claude PID may itself be the shell PID. A strict Claude-ancestor guard runs before the shell match so nested `claude -p` descendants cannot replace the outer session, even when the outer Claude is the terminal shell. A capture file is retried until its PID stops being a live Claude process, with a 30-minute give-up; there is no short staleness window.
-3. **No `name` is passed to `vscode.window.createTerminal`** — Claude Code 2.1.139+ owns the tab title via OSC escape sequences. Saves happen on session-ID capture, terminal close, and shutdown.
+1. Activation creates `RegistryWatcher` on `~/.claude/sessions` (or `<CLAUDE_CONFIG_DIR>/sessions` when the environment variable is nonempty). Capture waits until terminal restore completes, then runs one full reconcile. Directory events are debounced by 300 ms; there is no periodic registry poll. A missing directory is never created: the watcher logs the failure and retries attaching every 30 seconds.
+2. `sessionRegistry.ts` reads `claude agents --json` via `execFile` with a five-second timeout, falling back to the directory's `<pid>.json` files on command failure, empty output, or invalid output. Both paths validate PID and session UUID, skip malformed rows and background jobs, and never write to the registry. For each unadopted interactive PID, `pidResolver.ts` verifies that it is Claude and walks ancestry to a VS Code terminal's `processId`; `adoptWithSessionId()` saves its UUID and validated cwd without a name. Direct Claude terminal profiles and `exec claude` work because the Claude PID can be the terminal PID. The Claude-ancestor guard prevents nested Claude processes from replacing the outer session. Adoption shares one process snapshot per reconcile, skips adopted or in-flight PIDs, and retries unresolved rows up to three times two seconds apart before waiting for another event.
+3. **No `name` is passed to `vscode.window.createTerminal`** — Claude Code 2.1.139+ owns the tab title via OSC escape sequences. Saves happen on session adoption and user-initiated terminal close; shutdown preserves the saved entries.
 4. On VS Code reopen → `restoreTerminals()` reads v2 state, creates terminals with no `name` option in the saved cwd when it still exists (otherwise the workspace start directory), and runs `claude <resumeFlags> --resume '<sessionId>'`. When the default shell is zsh or bash, restore creates the terminal with `shellPath` and `shellArgs: ["-lc", "claude <resumeFlags> --resume '<sessionId>'; exec '<shell>' -il"]` (nothing is typed and VS Code does not inject shell integration into these terminals); other shells fall back to an immediate `sendText`.
+
+**Optional notifications:** `cc-persist.notifications` is a boolean with default `false`. `RegistryWatcher.onStatusChange(pid, from, to, row)` is a public settable callback for changed statuses of interactive PIDs seen in the previous reconcile. First sightings emit nothing, and missing PIDs lose their status history. `extension.ts` caches PID → terminal on adoption and rereads the setting on every status event. Only tracked terminals other than `vscode.window.activeTerminal` receive a toast: `busy` → `idle` calls `showInformationMessage("<name or index>: done", "Show")`; `busy` → `waiting` calls `showWarningMessage("<name or index>: needs input", "Show")`. The label is `row.name ?? terminalManager.getIndex(terminal)`, and **Show** calls `terminal.show()`. When disabled, this path makes no toast calls. The restore-count toast remains independent.
 
 **Required VS Code user setting** (for Claude's OSC titles to render in the tab):
 ```json
@@ -36,24 +38,25 @@ Upgrading from ≤0.4.x: run `scripts/migrate-name-only.py` (with VS Code quit) 
 Without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name.
 
 **Key modules:**
-- `extension.ts` — Activation wiring: creates TerminalManager and SidWatcher, registers the newTerminal command, runs restore
+- `extension.ts` — Activation wiring: creates TerminalManager and RegistryWatcher, registers the newTerminal command, runs restore, caches adopted terminals by PID, and handles optional status toasts
 - `pidResolver.ts` — Process-table parsing and ancestry matching, including the nested-Claude guard
 - `terminalManager.ts` — Terminal lifecycle: create, track, save/load state, restore sessions. Tracks UUIDs and validated absolute working directories by terminal index, and validates display names and configurable resume flags
-- `sidWatcher.ts` — Watches the signal dir (`fs.watch` + 10s poll) for `pid-<pid>.sid` captures and hands them to the PID resolver; nothing else
-- `config.ts` — Path resolution: workspace ID (folder name + hash), state dir (`~/.cc-persist/`), signal dir (`$TMPDIR/dtach-persist/`)
+- `sessionRegistry.ts` — Resolves the sessions directory and reads validated interactive rows through the CLI or file fallback
+- `registryWatcher.ts` — Watches the registry with `fs.watch`, defers capture until restore completes, debounces events, bounds adoption retries, and exposes `onStatusChange`
+- `config.ts` — Path resolution: workspace ID (folder name + hash), state dir (`~/.cc-persist/`), and cc-overlord metadata base (`$TMPDIR/dtach-persist/`)
 - `types.ts` — `SessionInfo` and `SessionState` interfaces
 
 ## Testing
 
-Tests use vitest with a VS Code mock at `test/__mocks__/vscode.ts` (aliased in vitest.config.ts). The mock provides fake `window.createTerminal`, event emitters, etc. Tests create real temp directories for state files.
+Tests use vitest with a VS Code mock at `test/__mocks__/vscode.ts` (aliased in vitest.config.ts). The mock provides fake terminals, event emitters, active-terminal state, and notification stubs. Tests create real temp directories for state files. The registry reader accepts an injected `runAgents`; the watcher accepts injected registry and process readers and a settable status callback for isolated verification.
 
 Stress tests (`*.stress.test.ts`) cover: duplicate indices, invalid state schemas, rapid create/close cycles, name validation edge cases, idempotent restore, index collision avoidance.
 
 ## Key Design Decisions
 
-- **Session UUID is the persistence handle** — the `SessionStart` hook captures it automatically. Session names are display-only metadata.
+- **Session UUID is the persistence handle** — capture reads it from Claude Code's live-session registry. Session names are display-only metadata.
 - **Claude Code owns the tab title** — cc-persist does not pass `name` to `vscode.window.createTerminal` in either the new-terminal or restore paths. Claude Code 2.1.139+ emits OSC title sequences. Requires user's `terminal.integrated.tabs.title` to include `${sequence}` (see Architecture).
-- **Env var name kept as `DTACH_SIGNAL_DIR`** — legacy name preserved so the existing SessionStart hook keeps working. `DTACH_SOCKET_INDEX` and the notification hooks were removed in 0.6.0.
+- **No env injection, no hook: capture reads Claude Code's registry** — the registry is read-only; `names.json` and `workspace.json` remain in the cc-overlord metadata base.
 - **`isTransient: true`** on created terminals — VS Code won't restore them natively (the extension handles restore)
 - **Resume inputs validated** — UUID validation protects the handle; configurable resume flags use a strict whitelist before entering the shell command
 - **`terminal.exitStatus.reason` decides on close** — User prunes the entry and saves; every other reason (Process, Shutdown, Extension, Unknown, undefined) preserves state on disk (a kept-by-mistake entry costs one extra restored tab, a pruned-by-mistake entry loses a session)

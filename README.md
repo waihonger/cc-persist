@@ -1,13 +1,13 @@
 # CC Persist
 
-VS Code extension that persists Claude Code terminal sessions across VS Code restarts. Unlike [dtach-persist](https://github.com/waihonger/dtach-vscode-persist) which keeps processes alive via dtach sockets, cc-persist uses Claude Code's native `--resume` feature — no background processes, just automatically captured session IDs. Since 0.6.0 that is all it does: the rename command and the completion/permission/error notifications were removed.
+VS Code extension that persists Claude Code terminal sessions across VS Code restarts. Unlike [dtach-persist](https://github.com/waihonger/dtach-vscode-persist) which keeps processes alive via dtach sockets, cc-persist uses Claude Code's native `--resume` feature — no background processes, just automatically captured session IDs. Version 0.7.0 captures sessions from Claude Code's live-session registry and offers optional completion and input notifications.
 
 ## Workflow
 
 ### First time setup
 
 1. Install the extension
-2. Configure Claude Code hooks (see below)
+2. Set `terminal.integrated.tabs.title` to `${sequence}` so Claude owns the tab titles (see Requirements)
 
 ### Daily usage
 
@@ -31,10 +31,8 @@ VS Code extension that persists Claude Code terminal sessions across VS Code res
 ## Requirements
 
 - VS Code 1.93+
-- [Claude Code](https://claude.ai/code) 2.1.139+ — owns the tab title via OSC escape sequences
+- [Claude Code](https://claude.ai/code) with a live-session registry, as observed in CLI 2.1.283. Claude owns the tab title via OSC escape sequences
 - VS Code user setting: `"terminal.integrated.tabs.title": "${sequence}"` — without this, VS Code's default `${process}` template wins and tabs show the running process string (e.g., "2.1.139") instead of Claude's session name
-- [Claude Code](https://claude.ai/code) hooks configured (see below)
-- `jq` (`brew install jq`) — the `SessionStart` hook uses it to build the session UUID + working-directory payload; without it, session-ID persistence is unavailable
 
 ## Install
 
@@ -54,39 +52,26 @@ code --install-extension cc-persist-*.vsix
 |---|---|---|
 | `cc-persist.newTerminal` | — | Create a new managed terminal |
 
-## Configure Claude Code hooks
+## How capture works
 
-Add to `~/.claude/settings.json`:
+Claude Code records live sessions in `~/.claude/sessions/<pid>.json`. When `CLAUDE_CONFIG_DIR` is set to a nonempty value in the extension's environment, cc-persist watches `<CLAUDE_CONFIG_DIR>/sessions` instead. It reads the registry through `claude agents --json` with a five-second timeout, falling back to parsing the directory's JSON files if the command fails or returns empty or malformed output. It accepts valid interactive sessions and skips background jobs and malformed rows. The registry is read-only for cc-persist; no hook configuration is needed.
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      { "matcher": "", "hooks": [{ "type": "command", "command": "if test -n \"$DTACH_SIGNAL_DIR\"; then sid_file=\"pid-$PPID.sid\"; jq -c '{sessionId:.session_id,cwd:.cwd}' > \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" && mv \"$DTACH_SIGNAL_DIR/$sid_file.tmp\" \"$DTACH_SIGNAL_DIR/$sid_file\"; fi; true", "timeout": 1000 }] }
-    ]
-  }
-}
-```
-
-The `SessionStart` hook captures the session UUID and absolute working directory on every start, resume, and clear. It always writes `pid-<claudePid>.sid`, using the hook's parent PID, with a JSON payload shaped like `{"sessionId":"<uuid>","cwd":"/absolute/path"}`. The `.tmp` + `mv` sequence makes publication atomic, and the extension consumes the `.sid` file without displaying it in the status bar.
+After terminal restore completes, cc-persist scans once, then responds to directory changes with a 300 ms debounce. It matches each Claude PID to its owning VS Code terminal and saves the session UUID and working directory. Unresolved terminals get up to three retries two seconds apart, then wait for another directory event. There is no periodic registry poll. If the directory is missing, cc-persist retries attaching the watcher every 30 seconds without creating it.
 
 ## Architecture
 
 **State persistence:**
 - State saved to `~/.cc-persist/<workspaceId>/state.json` — survives reboots
-- `pid-<pid>.sid` capture files in `$TMPDIR/dtach-persist/<workspaceId>/signals/` — ephemeral
-- The extension injects `DTACH_SIGNAL_DIR` into all terminals through VS Code's environment variable collection
-- **PID lane:** every new `SessionStart` capture writes `pid-<claudePid>.sid`; the extension verifies that PID is Claude, walks its process ancestry to a VS Code terminal's shell PID, adopts that terminal, and saves its UUID and working directory
-- A capture file is retried until its PID stops being a live Claude process, with a 30-minute give-up; there is no short staleness window.
+- Interactive registry rows are matched by process ancestry to a VS Code terminal; successful adoption saves the session UUID and working directory
 - The PID resolver accepts a terminal whose shell PID is the Claude PID itself, covering terminal profiles that run Claude directly or use `exec claude`
 - The PID resolver checks for another Claude process before accepting any ancestor as a terminal shell, so nested `claude -p` calls cannot overwrite the terminal's real session, including when the outer Claude process is itself the shell PID
 - PID-adopted terminals persist without a stored name
 - Restore starts each session in its captured working directory when that directory still exists, otherwise it falls back to the workspace start directory
 - Session names are optional, display-only metadata (kept in state for terminals renamed before 0.6.0)
-- `names.json` and `workspace.json` written to signal base dir for cc-overlord
+- `names.json` and `workspace.json` written to `$TMPDIR/dtach-persist/<workspaceId>/` for cc-overlord
 
 **Shutdown handling:**
-Terminal close events fire before `deactivate()` during VS Code shutdown. The extension uses a delayed cleanup pattern (300ms) so `setDisposing()` can cancel pending cleanups and save the full state before maps are cleared.
+Session IDs and working directories are saved on adoption. A terminal closed by the user is removed from saved state; other close reasons, including VS Code shutdown, preserve its saved entry for the next restore.
 
 **Restore flow:**
 1. Load state from disk
@@ -100,6 +85,14 @@ Terminal close events fire before `deactivate()` during VS Code shutdown. The ex
 |---|---|---|
 | `cc-persist.resumeFlags` | `--dangerously-skip-permissions` | Flags passed to `claude` during restore. Values containing shell metacharacters are rejected |
 | `cc-persist.closeRogueTerminals` | `true` | Close untracked terminals that VS Code creates while saved sessions restore |
+| `cc-persist.notifications` | `false` | Show a toast when Claude finishes or needs input in a background terminal |
+
+When `cc-persist.notifications` is enabled, a tracked terminal that is not the active terminal can show:
+
+- `busy` → `idle`: an information toast, `<name or index>: done`.
+- `busy` → `waiting`: a warning toast, `<name or index>: needs input`.
+
+Both use the registry session name when present, otherwise the terminal index. Choose **Show** to focus that terminal. No status toast appears when a session is first seen or when notifications are disabled (the default). Changes to the setting apply on the next status event without a reload. The existing “Restored N Claude terminal(s)” toast is independent of this setting.
 
 ## Development
 
