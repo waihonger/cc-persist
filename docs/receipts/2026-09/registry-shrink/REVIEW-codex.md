@@ -18,4 +18,4 @@ The brief is partly wrong: PID-only adoption and removal of process-generation v
 
 BLOCKED: runtime reproduction harness — the read-only sandbox rejected temporary-file creation. Orchestrator action needed: rerun reproductions and the suite in a writable environment.
 
-VERDICT: FIX — issues 1–7.
+VERDICT: FIX — issues 1–7. changed_commit=65e84ff (issues 1-6 fixed there; issue 7 not chased by lane decision b:23265, still open)
